@@ -1,4 +1,5 @@
 /bin/
+.codex/
 *.exe
 *.test
 *.out

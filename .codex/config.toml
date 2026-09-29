@@ -1,3 +1,0 @@
-# Project-scoped Codex config: full access, no approval prompts.
-approval_policy = "never"
-sandbox_mode = "danger-full-access"
