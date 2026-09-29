@@ -3,7 +3,9 @@ package asyncapi
 import "go.yaml.in/yaml/v3"
 
 // Raw document structs. Fields that may be a $ref are kept as yaml.Node and
-// resolved during normalization.
+// resolved during normalization. They are values, not *yaml.Node: yaml.v3
+// leaves *yaml.Node fields empty when decoding from a node rather than bytes.
+// An absent field has Kind 0.
 
 type info struct {
 	Title   string `yaml:"title"`
@@ -73,12 +75,12 @@ type messageDoc struct {
 
 type exampleDoc struct {
 	Name    string         `yaml:"name"`
-	Payload *yaml.Node     `yaml:"payload"`
+	Payload yaml.Node      `yaml:"payload"`
 	Headers map[string]any `yaml:"headers"`
 }
 
 type bindingsDoc struct {
-	AMQP *yaml.Node `yaml:"amqp"`
+	AMQP yaml.Node `yaml:"amqp"`
 }
 
 // ChannelBinding is the AMQP channel binding (bindingVersion 0.2.0/0.3.0).

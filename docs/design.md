@@ -93,8 +93,8 @@ wins. `sequence` uses an atomic counter owned by the operation, so it resets on
 reload.
 
 In `auto` mode the implicit default answers unmatched requests only when it
-has no request half itself. Otherwise `GET /pets/77` would receive the example
-recorded for `/pets/2`, which is wrong; such requests fall through to the
+has no request half itself. Otherwise `GET /notes/77` would receive the example
+recorded for `/notes/2`, which is wrong; such requests fall through to the
 fallback (or the 404 problem). An explicitly configured `default` is always
 honored. The default example prefers 2xx examples without a request half.
 
@@ -115,7 +115,7 @@ Windows 11, Ryzen 5 5600, Go 1.27, `-trimpath -ldflags="-s -w"`:
 | | target | measured |
 |---|---|---|
 | Binary (linux/amd64, static) | < 30 MB | 13.1 MB (arm64: 12.1 MB) |
-| Startup to listening (petstore) | < 200 ms | 19–24 ms in-process |
+| Startup to listening (original HTTP sample) | < 200 ms | 19–24 ms in-process |
 | Idle memory | < 30 MB RSS | 16.6 MB working set; 18.7 MB after 2k requests |
 | Static GET, in-process | — | ~5.9 µs, 55 allocs |
 | Templated, strictly validated POST | — | ~22 µs, 143 allocs |
@@ -170,10 +170,21 @@ headers and the routing key as the path.
   one publisher channel in confirm mode.
 - A reply is acked only after its publish is **confirmed**, so a broker
   failure mid-reply redelivers the request (at-least-once).
-- Outcomes: valid → reply, ack. Invalid payload (strict), no matching
-  example, dispatch/template error, or a `deadletter` fault → `nack(requeue=false)`,
-  which the broker routes to the queue's DLX when one is configured. Publish
-  failure (transient) → `nack(requeue=true)`.
+- Outcomes: valid → reply, ack. Invalid payload or headers (strict), no
+  matching example, dispatch/template error, a `deadletter` fault, a request
+  with no `reply_to` and no fixed reply address, or an **unroutable** reply →
+  `nack(requeue=false)`, which the broker routes to the queue's DLX when one
+  is configured. Unroutable replies are dead-lettered rather than requeued:
+  when the caller's reply queue is gone for good, requeueing would loop
+  forever. Transient publish failures (no confirm, lost channel) →
+  `nack(requeue=true)`.
+- Replies are published `mandatory`. Publish and confirm are serialized on
+  the publisher channel so a `basic.return` (sent before its `basic.ack`, and
+  handed over by amqp091 in wire order) belongs to the publish in flight.
+  This gives up reply pipelining, an acceptable cost for a mock.
+- A publisher-channel exception (e.g. a deleted exchange) restarts the
+  session, which redeclares the topology. Exchange overrides in mockmint.yaml
+  are checked with a passive declare, since mockmint does not own them.
 - Connection or channel loss → reconnect with exponential backoff and full
   jitter (`reconnect.min`..`reconnect.max`), then redeclare topology and
   restart consumers and schedules.

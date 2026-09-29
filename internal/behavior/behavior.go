@@ -17,8 +17,9 @@ import (
 
 // Fault actions.
 const (
-	ActionStatus = "status" // respond with Status (default)
-	ActionDrop   = "drop"   // close the connection without a response
+	ActionStatus     = "status"     // HTTP: respond with Status (default)
+	ActionDrop       = "drop"       // HTTP: close the connection; AMQP: ack without replying
+	ActionDeadLetter = "deadletter" // AMQP: reject the message to the dead-letter exchange
 )
 
 // Config is a behavior definition in mockmint.yaml. At package level it is
@@ -121,9 +122,9 @@ func Compile(cfg Config, now func() time.Time) (*Behavior, error) {
 			if f.Status < 400 || f.Status > 599 {
 				errs = append(errs, fmt.Errorf("faults[%d]: status must be 4xx or 5xx", i))
 			}
-		case ActionDrop:
+		case ActionDrop, ActionDeadLetter:
 		default:
-			errs = append(errs, fmt.Errorf("faults[%d]: action %q: want status or drop", i, f.Action))
+			errs = append(errs, fmt.Errorf("faults[%d]: action %q: want status, drop or deadletter", i, f.Action))
 		}
 		b.faults = append(b.faults, f)
 	}

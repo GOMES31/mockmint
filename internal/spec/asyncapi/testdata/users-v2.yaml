@@ -1,0 +1,54 @@
+asyncapi: 2.6.0
+info: {title: Users, version: "1.0"}
+channels:
+  user.signup:
+    $ref: "#/components/channels/signup"
+  user.audit:
+    bindings:
+      amqp:
+        is: routingKey
+        exchange: {name: audit, type: fanout}
+    publish:
+      operationId: receiveAudit
+      message:
+        oneOf:
+          - {$ref: "#/components/messages/Login"}
+          - {$ref: "#/components/messages/Logout"}
+components:
+  channels:
+    signup:
+      bindings:
+        amqp:
+          is: routingKey
+          exchange: {name: users, type: topic, durable: false}
+      subscribe:
+        operationId: userSignedUp
+        bindings:
+          amqp: {deliveryMode: 1}
+        message: {$ref: "#/components/messages/UserSignedUp"}
+  messages:
+    UserSignedUp:
+      messageId: userSignedUp
+      traits: [{$ref: "#/components/messageTraits/json"}]
+      payload:
+        type: object
+        properties:
+          id: {type: integer}
+          email: {type: string, format: email}
+      examples:
+        - name: ada
+          payload: {id: 1, email: ada@example.com}
+        - name: broken
+          payload: {id: "x"}
+    Login:
+      name: Login
+      payload: {type: object, properties: {user: {type: string}}}
+    Logout:
+      name: Logout
+      schemaFormat: application/vnd.apache.avro;version=1.9.0
+      payload: {type: record, name: Logout, fields: []}
+  messageTraits:
+    json:
+      contentType: application/json
+      bindings:
+        amqp: {messageType: user.signup}

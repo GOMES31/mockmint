@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"reflect"
 	"strconv"
@@ -24,6 +25,7 @@ const EnvPrefix = "MOCKMINT"
 // Config is the server configuration.
 type Config struct {
 	HTTP     HTTP     `yaml:"http"`
+	AMQP     AMQP     `yaml:"amqp"`
 	Log      Log      `yaml:"log"`
 	Packages Packages `yaml:"packages"`
 	Defaults Defaults `yaml:"defaults"`
@@ -36,6 +38,17 @@ type HTTP struct {
 	IdleTimeout       Duration `yaml:"idleTimeout"`
 	ShutdownTimeout   Duration `yaml:"shutdownTimeout"`
 	MaxBodyBytes      int64    `yaml:"maxBodyBytes"`
+}
+
+// AMQP configures the RabbitMQ engine. With an empty URL the engine is off
+// and mockmint serves HTTP only.
+type AMQP struct {
+	URL            string   `yaml:"url"` // amqp://user:pass@host:5672/vhost
+	Prefetch       int      `yaml:"prefetch"`
+	Heartbeat      Duration `yaml:"heartbeat"`
+	ReconnectMin   Duration `yaml:"reconnectMin"`
+	ReconnectMax   Duration `yaml:"reconnectMax"`
+	ConfirmTimeout Duration `yaml:"confirmTimeout"`
 }
 
 // Log configures log/slog output.
@@ -66,6 +79,13 @@ func Default() Config {
 			IdleTimeout:       Duration(60 * time.Second),
 			ShutdownTimeout:   Duration(10 * time.Second),
 			MaxBodyBytes:      10 << 20,
+		},
+		AMQP: AMQP{
+			Prefetch:       10,
+			Heartbeat:      Duration(10 * time.Second),
+			ReconnectMin:   Duration(500 * time.Millisecond),
+			ReconnectMax:   Duration(30 * time.Second),
+			ConfirmTimeout: Duration(5 * time.Second),
 		},
 		Log:      Log{Level: "info", Format: "json"},
 		Defaults: Defaults{Validation: "warn"},
@@ -102,6 +122,20 @@ func (c Config) Validate() error {
 	}
 	if c.HTTP.MaxBodyBytes <= 0 {
 		errs = append(errs, errors.New("http.maxBodyBytes must be positive"))
+	}
+	if c.AMQP.URL != "" {
+		if u, err := url.Parse(c.AMQP.URL); err != nil || (u.Scheme != "amqp" && u.Scheme != "amqps") {
+			errs = append(errs, errors.New("amqp.url must be an amqp:// or amqps:// URL"))
+		}
+	}
+	if c.AMQP.Prefetch < 1 || c.AMQP.Prefetch > 65535 {
+		errs = append(errs, errors.New("amqp.prefetch must be between 1 and 65535"))
+	}
+	if c.AMQP.ReconnectMin <= 0 || c.AMQP.ReconnectMax < c.AMQP.ReconnectMin {
+		errs = append(errs, errors.New("amqp: need 0 < reconnectMin <= reconnectMax"))
+	}
+	if c.AMQP.ConfirmTimeout <= 0 {
+		errs = append(errs, errors.New("amqp.confirmTimeout must be positive"))
 	}
 	switch c.Log.Level {
 	case "debug", "info", "warn", "error":

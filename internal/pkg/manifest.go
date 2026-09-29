@@ -37,8 +37,10 @@ type Manifest struct {
 	Version string `yaml:"version"`
 	// BasePath overrides where routes are mounted; "/" mounts them unprefixed.
 	BasePath string `yaml:"basePath"`
-	// Spec is the OpenAPI document's path in the package (default: detected).
-	Spec string `yaml:"spec"`
+	// Spec and AsyncAPI are the documents' paths in the package (default:
+	// detected). A package needs at least one of them.
+	Spec     string `yaml:"spec"`
+	AsyncAPI string `yaml:"asyncapi"`
 	// Validation is strict, warn or off (default: server default).
 	Validation string `yaml:"validation"`
 	// Seed makes random template values, latency and faults deterministic.
@@ -51,6 +53,9 @@ type Manifest struct {
 	Behavior   behavior.Config               `yaml:"behavior"`
 	Fallback   *Fallback                     `yaml:"fallback"`
 	Operations map[string]OperationOverrides `yaml:"operations"`
+
+	// Async configures the AsyncAPI (RabbitMQ) side of the package.
+	Async *AsyncManifest `yaml:"async"`
 }
 
 // OperationOverrides configure one operation, keyed in the manifest by

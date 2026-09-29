@@ -1,23 +1,25 @@
 # mockmint
 
-Lightweight API mocking from OpenAPI specs and example files: a single static
-binary (~13 MB), ~20 ms startup, under 20 MB resident at idle. No Go code per
-mock.
+Lightweight API and RabbitMQ mocking from OpenAPI and AsyncAPI specs and
+example files: a single static binary (~14 MB), ~20 ms startup, under 20 MB
+resident at idle. No Go code per mock.
 
-> Status: **Phase 1 (HTTP core)**. RabbitMQ/AsyncAPI (Phase 2), the admin API,
-> state and proxying (Phase 3) and contract testing (Phase 4) are not built yet.
+> Status: **Phases 1–2 (HTTP core, RabbitMQ engine)**. The admin API, state
+> and proxying (Phase 3) and contract testing (Phase 4) are not built yet.
 
 ## Quick start
 
 ```sh
 make build
-./bin/mockmint serve examples/petstore
+./bin/mockmint serve examples/notebook
 
-curl -i localhost:8080/petstore/1.0/pets/1          # example "tom"
-curl -i localhost:8080/petstore/1.0/pets/9          # fallback → 404 example
-curl -i 'localhost:8080/petstore/1.0/pets?status=sold'
-curl -i localhost:8080/petstore/1.0/pets -H 'Content-Type: application/json' \
-     -d '{"name":"Kiwi","kind":"cat"}'              # templated 201
+curl -i localhost:8080/notebook/1.0/notes/1          # read the "welcome" note
+curl -i 'localhost:8080/notebook/1.0/notes?status=published'  # list published notes
+curl -i localhost:8080/notebook/1.0/notes -H 'Content-Type: application/json' \
+     -d '{"title":"Meeting","content":"Agenda","status":"draft"}'  # create
+curl -i -X PUT localhost:8080/notebook/1.0/notes/1 -H 'Content-Type: application/json' \
+     -d '{"title":"Meeting","content":"Updated agenda","status":"published"}'  # update
+curl -i -X DELETE localhost:8080/notebook/1.0/notes/1  # delete
 ```
 
 Docker (distroless, non-root, amd64/arm64):
@@ -30,15 +32,28 @@ docker run -p 8080:8080 -v "$PWD/my-mocks:/mocks:ro" mockmint:dev serve /mocks
 `mockmint validate <paths...>` loads packages and exits non-zero on errors,
 so it works as a CI lint step for mock definitions.
 
+The Notebook example demonstrates CRUD responses. Mockmint does not persist
+created, updated, or deleted notes; stateful mocking is planned for Phase 3.
+
+RabbitMQ (see [RabbitMQ mocks](#rabbitmq-mocks-asyncapi)):
+
+```sh
+docker run -d -p 5672:5672 rabbitmq:4-alpine
+./bin/mockmint serve -amqp-url amqp://guest:guest@localhost:5672/ examples/orders-events
+```
+
 ## Mock packages
 
 A package is a directory (or `.zip` / `.tar.gz`) containing:
 
 ```
 openapi.yaml        # OpenAPI 3.0 or 3.1 (detected by its top-level `openapi` key)
+asyncapi.yaml       # AsyncAPI 2.6 or 3.0 (detected by `asyncapi`)
 mockmint.yaml       # optional: dispatch rules, behaviors, overrides
-examples/*.yaml     # optional: extra examples
+examples/*.yaml     # optional: extra HTTP examples
 ```
+
+A package needs at least one of the two specs; it can have both.
 
 `mockmint serve` takes package directories, archives, or directories *of*
 packages (for example a Kubernetes ConfigMap mount). Routes are mounted at
@@ -58,16 +73,16 @@ the same name, with a warning):
 
    ```yaml
    parameters:
-     - name: petId
+     - name: noteId
        in: path
-       examples: {tom: {value: 1}, rex: {value: 2}}
+       examples: {welcome: {value: 1}, ideas: {value: 2}}
    responses:
      "200":
        content:
          application/json:
            examples:
-             tom: {value: {id: 1, name: Tom}}
-             rex: {value: {id: 2, name: Rex}}
+             welcome: {value: {id: 1, title: Welcome}}
+             ideas: {value: {id: 2, title: Ideas}}
    ```
 
    A lone `example` (no name) is named after its status, e.g. `"404"`.
@@ -75,19 +90,18 @@ the same name, with a warning):
 2. **Example files** in `examples/`:
 
    ```yaml
-   operation: createPet            # operationId or "POST /pets"
+   operation: createNote           # operationId or "POST /notes"
    examples:
-     no-birds:
+     publish-first:
        request:                    # optional; used by the auto dispatcher
          params: {}                # path parameters
          query: {}
          headers: {}
-         body: {kind: bird}        # matched as a subset of the request body
+         body: {status: published} # matched as a subset of the request body
        response:
          status: 422               # default: the lowest declared 2xx
          mediaType: application/problem+json   # default: from the spec
-         headers: {X-Reason: birds}
-         body: {title: Birds are not supported}  # string = verbatim, else JSON
+         body: {title: Create a draft before publishing}  # string = verbatim, else JSON
    ```
 
 3. **Synthesis.** If no example covers the lowest 2xx response, one named
@@ -102,7 +116,7 @@ Examples that do not match their schema are reported as warnings at load time.
 ### mockmint.yaml
 
 ```yaml
-name: petstore               # default: slug of info.title
+name: notebook               # default: slug of info.title
 version: "1.0"               # default: info.version
 basePath: /api               # default: /{name}/{version}; "/" = unprefixed
 spec: openapi.yaml           # default: auto-detected
@@ -121,7 +135,7 @@ behavior:                    # package default for every operation
 fallback: {example: missing}  # or {status: 404, mediaType: ..., headers: ..., body: ...}
 
 operations:                   # keyed by operationId or "METHOD /path"
-  getPet:
+  getNote:
     dispatcher: {...}
     behavior: {...}           # replaces the package behavior field by field
     fallback: {...}
@@ -169,7 +183,7 @@ dispatcher:
 When nothing matches: the dispatcher's `default`, else the operation's
 fallback, else `404 application/problem+json`. In `auto` mode the implicit
 default only catches unmatched requests if it has no request half itself, so
-`GET /pets/77` never gets the example recorded for `/pets/2`.
+`GET /notes/77` never gets the example recorded for `/notes/2`.
 
 ### Templates
 
@@ -206,6 +220,72 @@ All mockmint errors are [RFC 9457](https://www.rfc-editor.org/rfc/rfc9457)
 `Allow`), 413, 415, 429, 500 and injected faults. Each response names the
 example used in `X-Mockmint-Example`.
 
+## RabbitMQ mocks (AsyncAPI)
+
+mockmint plays the application an AsyncAPI document describes. Operations
+map to behavior by their `action` (AsyncAPI 2.x `publish` is `receive`,
+`subscribe` is `send`):
+
+| operation | mockmint |
+|---|---|
+| `receive` with a reply (3.0 `reply`, or `replyWith`) | **request/reply**: consumes the queue, picks a reply example, publishes it to the request's `reply_to` (or the reply channel's address) with the request's `correlation_id` (falling back to its `message_id`), and acks only after the broker confirms the reply |
+| `receive` without a reply | **sink**: validates and acks |
+| `send` | **publish**: on a `schedule`, or on demand (admin API in Phase 3) |
+
+Queues and exchanges come from the AMQP channel bindings: `is: queue` names a
+queue; `is: routingKey` publishes to the binding's exchange with the channel
+address as routing key, and receive operations on it get a queue bound to
+that exchange (the binding's queue name, else `mockmint.<package>.<operation>`,
+auto-deleted). Exchanges and queues default to durable; exchanges to `topic`.
+
+Request and reply examples **pair by name**, like HTTP: a request example
+`bulk` selects the reply example `bulk`; a reply example without a paired
+request example is the catch-all. Every dispatcher works on messages: AMQP
+headers are headers, the routing key is the path, and the body is the
+payload. Templates see `.Request.Body`, `.Request.Headers` (AMQP headers plus
+`Correlation-Id`, `Reply-To`, `Message-Id`, `Routing-Key`, `Exchange`,
+`Content-Type`) and all the usual helpers. Messages without examples get one
+synthesized from the payload schema.
+
+```yaml
+async:
+  declare: true              # declare exchanges, queues, bindings on connect
+  validation: strict         # default: the package validation
+  deadLetter:
+    exchange: orders.dlx     # fanout exchange + orders.dlx.queue, set as the
+                             # x-dead-letter-exchange of every consumed queue
+  behavior:                  # default for every async operation
+    latency: {min: 5ms, max: 20ms}
+    faults:
+      - {probability: 0.01, action: drop}        # ack but never reply
+      - {probability: 0.01, action: deadletter}  # reject to the DLX
+  operations:                # keyed by AsyncAPI operation id
+    placeOrder:
+      queue: orders.requests # override the consumed queue
+      replyWith: orderReply  # 2.x: the send operation whose messages are replies
+      noReply: false         # true turns a 3.0 request/reply into a sink
+      dispatcher: {...}      # any dispatcher
+      fallback: accepted     # reply example when nothing matches
+    publishOrderCreated:
+      exchange: orders.events   # override the publish target
+      routingKey: order.created
+      schedule: {interval: 5s, initialDelay: 1s, examples: [widget, gadget]}
+```
+
+**Outcomes.** A valid message gets its reply and is acked. In `strict` mode an
+invalid payload, a reply example that fails its schema, no matching example
+without a fallback, or a `deadletter` fault **rejects** the message without
+requeue, so the broker routes it to the DLX. A reply the broker does not
+confirm (or a lost connection) **requeues** the request. `warn` logs
+validation problems and carries on.
+
+**Reliability.** One connection with a channel per consumer (`prefetch`,
+manual acks) and a confirm-mode publisher channel. When the connection or a
+channel drops, mockmint reconnects with exponential backoff and full jitter,
+redeclares the topology, and resumes consumers and schedules. Without
+`amqp.url` the engine is off and HTTP runs alone; a configured broker that is
+down never blocks startup.
+
 ## Server configuration
 
 `mockmint serve -config mockmint-server.yaml`, and/or `MOCKMINT_*`
@@ -219,6 +299,13 @@ http:
   idleTimeout: 60s
   shutdownTimeout: 10s
   maxBodyBytes: 10485760
+amqp:
+  url: ""           # amqp://user:pass@host:5672/vhost; empty = HTTP only
+  prefetch: 10      # unacked messages per consumer
+  heartbeat: 10s
+  reconnectMin: 500ms
+  reconnectMax: 30s
+  confirmTimeout: 5s
 log:
   level: info       # debug logs every request
   format: json      # or text
@@ -234,6 +321,8 @@ defaults:
 ```sh
 make test         # unit tests
 make race         # needs a C compiler (cgo) for the race detector
+make integration  # RabbitMQ tests via testcontainers (Docker, or Podman with
+                  # TESTCONTAINERS_RYUK_DISABLED=true)
 make lint         # golangci-lint v2
 make bench
 ```

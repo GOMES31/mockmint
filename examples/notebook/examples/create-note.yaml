@@ -1,0 +1,16 @@
+operation: createNote
+examples:
+  created:
+    response:
+      status: 201
+      headers:
+        X-Created-Title: "{{.Request.Body.title}}"
+      body: |
+        {"id": {{.RandInt 100 999}}, "title": {{json .Request.Body.title}}, "content": {{json .Request.Body.content}}, "status": "draft", "createdAt": "{{.Timestamp}}"}
+  publish-first:
+    request:
+      body: {status: published}
+    response:
+      status: 422
+      mediaType: application/problem+json
+      body: {type: "about:blank", title: Unprocessable Entity, status: 422, detail: Create a draft before publishing.}

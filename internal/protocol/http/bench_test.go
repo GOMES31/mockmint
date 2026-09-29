@@ -10,7 +10,7 @@ import (
 // BenchmarkServe measures the in-process request path (no network) for a
 // static example, a templated example, and a strictly validated POST.
 func BenchmarkServe(b *testing.B) {
-	rt, err := NewRouter(loadPetstoreB(b), 1<<20, nil)
+	rt, err := NewRouter(loadNotebookB(b), 1<<20, nil)
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -18,9 +18,9 @@ func BenchmarkServe(b *testing.B) {
 	cases := []struct {
 		name, method, path, body string
 	}{
-		{"static-get", "GET", "/petstore/1.0/pets/1", ""},
-		{"list-query", "GET", "/petstore/1.0/pets?status=sold", ""},
-		{"templated-post", "POST", "/petstore/1.0/pets", `{"name":"Kiwi","kind":"cat"}`},
+		{"static-get", "GET", "/notebook/1.0/notes/1", ""},
+		{"list-query", "GET", "/notebook/1.0/notes?status=published", ""},
+		{"templated-post", "POST", "/notebook/1.0/notes", `{"title":"Meeting","content":"Agenda","status":"draft"}`},
 	}
 	for _, c := range cases {
 		b.Run(c.name, func(b *testing.B) {

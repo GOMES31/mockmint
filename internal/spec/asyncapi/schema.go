@@ -1,14 +1,18 @@
 package asyncapi
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"io/fs"
 	"net/url"
+	"slices"
 	"strings"
 
 	"github.com/santhosh-tekuri/jsonschema/v6"
 	"go.yaml.in/yaml/v3"
+	"golang.org/x/text/language"
+	"golang.org/x/text/message"
 )
 
 // resourceBase is the URL scheme under which package files are registered
@@ -48,24 +52,38 @@ func (s *Schema) Validate(v any) []Violation {
 		return []Violation{{Message: err.Error()}}
 	}
 	var out []Violation
-	for _, u := range ve.BasicOutput().Errors {
-		if u.Error == nil {
-			continue
-		}
-		out = append(out, Violation{Path: u.InstanceLocation, Message: u.Error.String()})
-	}
-	if len(out) == 0 {
-		out = append(out, Violation{Message: strings.Join(strings.Fields(ve.Error()), " ")})
-	}
+	leaves(ve, &out)
+	slices.SortStableFunc(out, func(a, b Violation) int { return cmp.Compare(a.Path, b.Path) })
 	return out
 }
 
+// leaves collects the most specific errors: group errors such as
+// "validation failed" or "allOf failed" only restate their causes.
+func leaves(ve *jsonschema.ValidationError, out *[]Violation) {
+	if len(ve.Causes) > 0 {
+		for _, c := range ve.Causes {
+			leaves(c, out)
+		}
+		return
+	}
+	ptr := ""
+	if len(ve.InstanceLocation) > 0 {
+		parts := make([]string, len(ve.InstanceLocation))
+		for i, p := range ve.InstanceLocation {
+			parts[i] = escapePtr(p)
+		}
+		ptr = "/" + strings.Join(parts, "/")
+	}
+	*out = append(*out, Violation{Path: ptr, Message: ve.ErrorKind.LocalizedString(printer)})
+}
+
+var printer = message.NewPrinter(language.English)
+
 // schemaSet compiles schemas, registering each package file once.
 type schemaSet struct {
-	fsys      fs.FS
-	compiler  *jsonschema.Compiler
-	added     map[string]bool
-	loaderErr error
+	fsys     fs.FS
+	compiler *jsonschema.Compiler
+	added    map[string]bool
 }
 
 func newSchemaSet(fsys fs.FS) *schemaSet {

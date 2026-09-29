@@ -1,0 +1,113 @@
+asyncapi: 3.0.0
+info:
+  title: Orders Events
+  version: "1.0"
+  description: Sample mockmint package for RabbitMQ. See mockmint.yaml.
+channels:
+  orderRequests:
+    address: orders.requests
+    bindings:
+      amqp:
+        is: queue
+        queue: {name: orders.requests, durable: true}
+    messages:
+      PlaceOrder: {$ref: "#/components/messages/PlaceOrder"}
+  orderReplies:
+    address: null                    # replies go to the request's reply_to
+    messages:
+      OrderResult: {$ref: "#/components/messages/OrderResult"}
+  orderEvents:
+    address: order.created
+    bindings:
+      amqp:
+        is: routingKey
+        exchange: {name: orders.events, type: topic, durable: true}
+    messages:
+      OrderCreated: {$ref: "#/components/messages/OrderCreated"}
+  paymentEvents:
+    address: payment.#
+    bindings:
+      amqp:
+        is: routingKey
+        exchange: {name: payments.events, type: topic, durable: true}
+        queue: {name: orders.payments, durable: true}
+    messages:
+      PaymentSettled: {$ref: "#/components/messages/PaymentSettled"}
+operations:
+  placeOrder:
+    action: receive
+    channel: {$ref: "#/channels/orderRequests"}
+    reply:
+      channel: {$ref: "#/channels/orderReplies"}
+  publishOrderCreated:
+    action: send
+    channel: {$ref: "#/channels/orderEvents"}
+    bindings:
+      amqp: {deliveryMode: 2}
+  consumePayments:
+    action: receive
+    channel: {$ref: "#/channels/paymentEvents"}
+components:
+  messages:
+    PlaceOrder:
+      name: PlaceOrder
+      contentType: application/json
+      payload: {$ref: "#/components/schemas/PlaceOrder"}
+      examples:
+        - name: bulk
+          payload: {sku: WIDGET-9, qty: 500}
+        - name: single
+          payload: {sku: WIDGET-9, qty: 1}
+    OrderResult:
+      name: OrderResult
+      contentType: application/json
+      payload: {$ref: "#/components/schemas/OrderResult"}
+      examples:
+        - name: bulk
+          payload: {status: rejected, reason: Quantity above limit}
+        - name: single
+          headers: {x-order-id: "{{.UUID}}"}
+          payload: {status: accepted, orderId: "{{.UUID}}", sku: "{{.Request.Body.sku}}"}
+        - name: accepted
+          payload: {status: accepted, orderId: "{{.UUID}}", sku: "{{.Request.Body.sku}}"}
+    OrderCreated:
+      name: OrderCreated
+      contentType: application/json
+      payload: {$ref: "#/components/schemas/OrderCreated"}
+      examples:
+        - name: widget
+          payload: {orderId: "{{.UUID}}", sku: WIDGET-9, qty: 2, createdAt: "{{.Timestamp}}"}
+        - name: gadget
+          payload: {orderId: "{{.UUID}}", sku: GADGET-1, qty: 1, createdAt: "{{.Timestamp}}"}
+    PaymentSettled:
+      name: PaymentSettled
+      contentType: application/json
+      payload:
+        type: object
+        required: [orderId, amount]
+        properties:
+          orderId: {type: string}
+          amount: {type: number, minimum: 0}
+  schemas:
+    PlaceOrder:
+      type: object
+      required: [sku, qty]
+      properties:
+        sku: {type: string, minLength: 3}
+        qty: {type: integer, minimum: 1}
+    OrderResult:
+      type: object
+      required: [status]
+      properties:
+        status: {type: string, enum: [accepted, rejected]}
+        orderId: {type: string, format: uuid}
+        sku: {type: string}
+        reason: {type: string}
+    OrderCreated:
+      type: object
+      required: [orderId, sku, qty]
+      properties:
+        orderId: {type: string, format: uuid}
+        sku: {type: string}
+        qty: {type: integer, minimum: 1}
+        createdAt: {type: string, format: date-time}

@@ -18,6 +18,7 @@ import (
 	"github.com/mockmint/mockmint/internal/config"
 	"github.com/mockmint/mockmint/internal/observability"
 	"github.com/mockmint/mockmint/internal/pkg"
+	mamqp "github.com/mockmint/mockmint/internal/protocol/amqp"
 	mhttp "github.com/mockmint/mockmint/internal/protocol/http"
 )
 
@@ -27,7 +28,7 @@ var version = "dev"
 const usage = `mockmint - lightweight API mocking
 
 Usage:
-  mockmint serve    [-config file] [-addr :8080] [package paths...]
+  mockmint serve    [-config file] [-addr :8080] [-amqp-url amqp://...] [package paths...]
   mockmint validate [-config file] [package paths...]
   mockmint version
 
@@ -114,15 +115,23 @@ func loadPackages(ctx context.Context, c *common) ([]*pkg.Package, error) {
 
 func serve(args, environ []string, stderr io.Writer) int {
 	start := time.Now()
-	var addr string
+	var addr, amqpURL string
 	c, code := setup("serve", args, environ, stderr, func(fs *flag.FlagSet) {
 		fs.StringVar(&addr, "addr", "", "listen address (overrides http.addr)")
+		fs.StringVar(&amqpURL, "amqp-url", "", "RabbitMQ URL (overrides amqp.url); empty serves HTTP only")
 	})
 	if code >= 0 {
 		return code
 	}
 	if addr != "" {
 		c.cfg.HTTP.Addr = addr
+	}
+	if amqpURL != "" {
+		c.cfg.AMQP.URL = amqpURL
+		if err := c.cfg.Validate(); err != nil {
+			c.log.Error("invalid configuration", "error", err)
+			return 1
+		}
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -140,6 +149,11 @@ func serve(args, environ []string, stderr io.Writer) int {
 		c.log.Error("building routes failed", "error", err)
 		return 1
 	}
+	engine, err := mamqp.New(pkgs, amqpOptions(c.cfg.AMQP), c.log)
+	if err != nil {
+		c.log.Error("planning RabbitMQ topology failed", "error", err)
+		return 1
+	}
 	srv := mhttp.NewServer(rt, mhttp.Options{
 		Addr:              c.cfg.HTTP.Addr,
 		ReadHeaderTimeout: c.cfg.HTTP.ReadHeaderTimeout.D(),
@@ -152,15 +166,33 @@ func serve(args, environ []string, stderr io.Writer) int {
 	}
 	c.log.Info("mockmint ready", "version", version, "addr", ln.Addr().String(), "packages", len(pkgs), "startup", time.Since(start).String())
 
+	// The AMQP engine never blocks startup: an unreachable broker is retried
+	// in the background while HTTP serves.
+	amqpDone := make(chan struct{})
+	actx, stopAMQP := context.WithCancel(context.Background())
+	defer stopAMQP()
+	switch {
+	case !engine.HasOperations():
+		close(amqpDone)
+	case c.cfg.AMQP.URL == "":
+		c.log.Warn("packages have AsyncAPI operations but amqp.url is not set; serving HTTP only")
+		close(amqpDone)
+	default:
+		go func() {
+			defer close(amqpDone)
+			engine.Run(actx)
+		}()
+	}
+
 	errc := make(chan error, 1)
 	go func() { errc <- srv.Serve(ln) }()
+	exit := 0
 	select {
 	case err := <-errc:
 		if err != nil {
 			c.log.Error("server failed", "error", err)
-			return 1
+			exit = 1
 		}
-		return 0
 	case <-ctx.Done():
 	}
 	c.log.Info("shutting down", "timeout", c.cfg.HTTP.ShutdownTimeout.D().String())
@@ -168,9 +200,27 @@ func serve(args, environ []string, stderr io.Writer) int {
 	defer cancel()
 	if err := srv.Shutdown(sctx); err != nil {
 		c.log.Error("shutdown incomplete", "error", err)
-		return 1
+		exit = 1
 	}
-	return 0
+	stopAMQP() // stops consumers; in-flight messages are acked or requeued
+	select {
+	case <-amqpDone:
+	case <-sctx.Done():
+		c.log.Error("RabbitMQ shutdown incomplete")
+		exit = 1
+	}
+	return exit
+}
+
+func amqpOptions(a config.AMQP) mamqp.Options {
+	return mamqp.Options{
+		URL:            a.URL,
+		Prefetch:       a.Prefetch,
+		Heartbeat:      a.Heartbeat.D(),
+		ReconnectMin:   a.ReconnectMin.D(),
+		ReconnectMax:   a.ReconnectMax.D(),
+		ConfirmTimeout: a.ConfirmTimeout.D(),
+	}
 }
 
 func validate(args, environ []string, stdout, stderr io.Writer) int {
@@ -186,6 +236,9 @@ func validate(args, environ []string, stdout, stderr io.Writer) int {
 	if err == nil {
 		_, err = mhttp.NewRouter(pkgs, c.cfg.HTTP.MaxBodyBytes, c.log)
 	}
+	if err == nil {
+		_, err = mamqp.Plan(pkgs)
+	}
 	if err != nil {
 		fmt.Fprintln(stderr, "invalid:", err)
 		return 1
@@ -195,8 +248,13 @@ func validate(args, environ []string, stdout, stderr io.Writer) int {
 		for _, op := range p.Operations {
 			warnings += len(op.Warnings)
 		}
-		fmt.Fprintf(stdout, "ok  %s %s  mounted at %s  %d operations, %d warnings\n",
-			p.Name, p.Version, orSlash(p.BasePath), len(p.Operations), warnings)
+		async := ""
+		if p.Async != nil {
+			warnings += len(p.AsyncSpec.Warnings)
+			async = fmt.Sprintf(", %d async operations", len(p.Async.Operations))
+		}
+		fmt.Fprintf(stdout, "ok  %s %s  mounted at %s  %d operations%s, %d warnings\n",
+			p.Name, p.Version, orSlash(p.BasePath), len(p.Operations), async, warnings)
 	}
 	return 0
 }

@@ -11,11 +11,11 @@ import (
 
 func discard() *slog.Logger { return slog.New(slog.DiscardHandler) }
 
-// loadPetstoreB loads the sample package with latency disabled so
+// loadNotebookB loads the sample package with latency disabled so
 // benchmarks measure mockmint, not injected sleeps.
-func loadPetstoreB(b *testing.B) []*pkg.Package {
+func loadNotebookB(b *testing.B) []*pkg.Package {
 	b.Helper()
-	pkgs, err := pkg.LoadPath(context.Background(), "../../../examples/petstore", pkg.Defaults{Validation: "warn"}, nil)
+	pkgs, err := pkg.LoadPath(context.Background(), "../../../examples/notebook", pkg.Defaults{Validation: "warn"}, nil)
 	if err != nil {
 		b.Fatal(err)
 	}

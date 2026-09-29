@@ -17,9 +17,9 @@ import (
 	"github.com/mockmint/mockmint/internal/problem"
 )
 
-func loadPetstore(t *testing.T) []*pkg.Package {
+func loadNotebook(t *testing.T) []*pkg.Package {
 	t.Helper()
-	pkgs, err := pkg.LoadPath(context.Background(), "../../../examples/petstore", pkg.Defaults{Validation: "warn"}, nil)
+	pkgs, err := pkg.LoadPath(context.Background(), "../../../examples/notebook", pkg.Defaults{Validation: "warn"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,53 +93,51 @@ func problemOf(t *testing.T, r result) map[string]any {
 	return m
 }
 
-func TestPetstoreEndToEnd(t *testing.T) {
-	srv := newServer(t, loadPetstore(t)...)
-	base := "/petstore/1.0"
+func TestNotebookEndToEnd(t *testing.T) {
+	srv := newServer(t, loadNotebook(t)...)
+	base := "/notebook/1.0"
 
 	// auto dispatch: request halves from parameter examples.
-	r := do(t, srv, "GET", base+"/pets/2", "")
-	if r.status != 200 || !strings.Contains(r.body, `"name":"Rex"`) || r.header.Get(HeaderExample) != "rex" {
-		t.Fatalf("GET /pets/2 = %d %s", r.status, r.body)
+	r := do(t, srv, "GET", base+"/notes/2", "")
+	if r.status != 200 || !strings.Contains(r.body, `"title":"Ideas"`) || r.header.Get(HeaderExample) != "ideas" {
+		t.Fatalf("GET /notes/2 = %d %s", r.status, r.body)
 	}
 	// fallback example for unmatched ids.
-	r = do(t, srv, "GET", base+"/pets/77", "")
-	if r.status != 404 || r.header.Get("Content-Type") != "application/problem+json" || !strings.Contains(r.body, "No such pet") {
-		t.Fatalf("GET /pets/77 = %d %s", r.status, r.body)
+	r = do(t, srv, "GET", base+"/notes/77", "")
+	if r.status != 404 || r.header.Get("Content-Type") != "application/problem+json" || !strings.Contains(r.body, "No such note") {
+		t.Fatalf("GET /notes/77 = %d %s", r.status, r.body)
 	}
 	// query_params dispatcher.
-	if r = do(t, srv, "GET", base+"/pets?status=sold", ""); r.header.Get(HeaderExample) != "sold" {
-		t.Fatalf("sold = %s", r.header.Get(HeaderExample))
+	if r = do(t, srv, "GET", base+"/notes?status=published", ""); r.header.Get(HeaderExample) != "published" {
+		t.Fatalf("published = %s", r.header.Get(HeaderExample))
 	}
-	if r = do(t, srv, "GET", base+"/pets", ""); r.header.Get(HeaderExample) != "all" {
+	if r = do(t, srv, "GET", base+"/notes", ""); r.header.Get(HeaderExample) != "all" {
 		t.Fatalf("all = %s", r.header.Get(HeaderExample))
 	}
 	// body_jsonpath dispatcher + templated response.
-	r = do(t, srv, "POST", base+"/pets", `{"name":"Kiwi","kind":"bird"}`)
+	r = do(t, srv, "POST", base+"/notes", `{"title":"News","content":"Ready","status":"published"}`)
 	if r.status != 422 || r.header.Get("Content-Type") != "application/problem+json" {
-		t.Fatalf("bird = %d %s", r.status, r.body)
+		t.Fatalf("publish-first = %d %s", r.status, r.body)
 	}
-	r = do(t, srv, "POST", base+"/pets", `{"name":"Tom \"2\"","kind":"cat"}`)
-	var pet map[string]any
-	if r.status != 201 || json.Unmarshal([]byte(r.body), &pet) != nil {
+	r = do(t, srv, "POST", base+"/notes", `{"title":"Meeting \"2\"","content":"Agenda","status":"draft"}`)
+	var note map[string]any
+	if r.status != 201 || json.Unmarshal([]byte(r.body), &note) != nil {
 		t.Fatalf("create = %d %s", r.status, r.body)
 	}
-	if pet["name"] != `Tom "2"` || pet["createdAt"] != "2025-01-01T12:00:00.000Z" || r.header.Get("X-Created-Name") != `Tom "2"` {
+	if note["title"] != `Meeting "2"` || note["createdAt"] != "2025-01-01T12:00:00.000Z" || r.header.Get("X-Created-Title") != `Meeting "2"` {
 		t.Fatalf("templated = %s headers %v", r.body, r.header)
 	}
 	// Deterministic under seed: same request, same body.
-	if again := do(t, srv, "POST", base+"/pets", `{"name":"Tom \"2\"","kind":"cat"}`); again.body != r.body {
+	if again := do(t, srv, "POST", base+"/notes", `{"title":"Meeting \"2\"","content":"Agenda","status":"draft"}`); again.body != r.body {
 		t.Fatalf("not deterministic:\n%s\n%s", r.body, again.body)
 	}
-	// sequence dispatcher.
-	for _, want := range []string{"placed", "approved", "delivered", "delivered"} {
-		r = do(t, srv, "GET", base+"/orders/o-1/status", "")
-		if !strings.Contains(r.body, `"status": "`+want+`"`) || !strings.Contains(r.body, `"orderId": "o-1"`) {
-			t.Fatalf("sequence want %s, got %s", want, r.body)
-		}
+	// Update returns request data, including the path id.
+	r = do(t, srv, "PUT", base+"/notes/1", `{"title":"Welcome again","content":"Revised","status":"published"}`)
+	if r.status != 200 || !strings.Contains(r.body, `"id": 1`) || !strings.Contains(r.body, `"title": "Welcome again"`) {
+		t.Fatalf("update = %d %s", r.status, r.body)
 	}
 	// 204 without body or content type.
-	r = do(t, srv, "DELETE", base+"/pets/1", "")
+	r = do(t, srv, "DELETE", base+"/notes/1", "")
 	if r.status != 204 && r.status != 503 {
 		t.Fatalf("delete = %d", r.status)
 	}
@@ -149,8 +147,8 @@ func TestPetstoreEndToEnd(t *testing.T) {
 }
 
 func TestStrictValidation(t *testing.T) {
-	srv := newServer(t, loadPetstore(t)...)
-	r := do(t, srv, "POST", "/petstore/1.0/pets", `{"name":"","kind":"lizard"}`)
+	srv := newServer(t, loadNotebook(t)...)
+	r := do(t, srv, "POST", "/notebook/1.0/notes", `{"title":"","content":"Text","status":"missing"}`)
 	if r.status != 400 {
 		t.Fatalf("status = %d %s", r.status, r.body)
 	}
@@ -159,15 +157,15 @@ func TestStrictValidation(t *testing.T) {
 	if p["type"] != problem.TypeValidation || len(errs) != 2 {
 		t.Fatalf("problem = %v", p)
 	}
-	r = do(t, srv, "POST", "/petstore/1.0/pets", `name=x`, "Content-Type", "application/x-www-form-urlencoded")
+	r = do(t, srv, "POST", "/notebook/1.0/notes", `title=x`, "Content-Type", "application/x-www-form-urlencoded")
 	if r.status != 415 || problemOf(t, r)["type"] != problem.TypeUnsupportedMedia {
 		t.Fatalf("415 = %d %s", r.status, r.body)
 	}
-	r = do(t, srv, "GET", "/petstore/1.0/pets/abc", "")
+	r = do(t, srv, "GET", "/notebook/1.0/notes/abc", "")
 	if r.status != 400 {
 		t.Fatalf("bad path param = %d", r.status)
 	}
-	r = do(t, srv, "GET", "/petstore/1.0/pets?limit=500", "")
+	r = do(t, srv, "GET", "/notebook/1.0/notes?limit=500", "")
 	if r.status != 400 {
 		t.Fatalf("bad query param = %d", r.status)
 	}
@@ -203,28 +201,28 @@ paths:
 `
 
 func TestNotFoundAndMethodNotAllowed(t *testing.T) {
-	srv := newServer(t, loadPetstore(t)...)
+	srv := newServer(t, loadNotebook(t)...)
 	r := do(t, srv, "GET", "/nope", "")
 	if r.status != 404 || problemOf(t, r)["type"] != problem.TypeNotFound {
 		t.Fatalf("404 = %d %s", r.status, r.body)
 	}
-	r = do(t, srv, "PUT", "/petstore/1.0/pets/1", "")
-	if r.status != 405 || r.header.Get("Allow") != "DELETE, GET, HEAD" {
+	r = do(t, srv, "PATCH", "/notebook/1.0/notes/1", "")
+	if r.status != 405 || r.header.Get("Allow") != "DELETE, GET, HEAD, PUT" {
 		t.Fatalf("405 = %d allow %q", r.status, r.header.Get("Allow"))
 	}
 	p := problemOf(t, r)
-	if p["type"] != problem.TypeMethodNotAllowed || p["instance"] != "/petstore/1.0/pets/1" {
+	if p["type"] != problem.TypeMethodNotAllowed || p["instance"] != "/notebook/1.0/notes/1" {
 		t.Fatalf("problem = %v", p)
 	}
-	r = do(t, srv, "HEAD", "/petstore/1.0/pets/1", "")
+	r = do(t, srv, "HEAD", "/notebook/1.0/notes/1", "")
 	if r.status != 200 || r.body != "" || r.header.Get("Content-Length") == "" {
 		t.Fatalf("HEAD = %d %q %v", r.status, r.body, r.header)
 	}
 }
 
 func TestBodyTooLarge(t *testing.T) {
-	srv := newServer(t, loadPetstore(t)...) // limit 1 KiB
-	r := do(t, srv, "POST", "/petstore/1.0/pets", `{"name":"`+strings.Repeat("x", 2048)+`","kind":"cat"}`)
+	srv := newServer(t, loadNotebook(t)...) // limit 1 KiB
+	r := do(t, srv, "POST", "/notebook/1.0/notes", `{"title":"`+strings.Repeat("x", 2048)+`","content":"Text","status":"draft"}`)
 	if r.status != 413 || problemOf(t, r)["type"] != problem.TypeBodyTooLarge {
 		t.Fatalf("413 = %d %s", r.status, r.body)
 	}
@@ -404,7 +402,7 @@ func TestSwapIsAtomicUnderLoad(t *testing.T) {
 }
 
 func TestServeAndShutdown(t *testing.T) {
-	rt, err := NewRouter(loadPetstore(t), 1024, nil)
+	rt, err := NewRouter(loadNotebook(t), 1024, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -415,7 +413,7 @@ func TestServeAndShutdown(t *testing.T) {
 	}
 	done := make(chan error, 1)
 	go func() { done <- s.Serve(ln) }()
-	resp, err := http.Get("http://" + ln.Addr().String() + "/petstore/1.0/pets/1")
+	resp, err := http.Get("http://" + ln.Addr().String() + "/notebook/1.0/notes/1")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1,0 +1,71 @@
+asyncapi: 3.0.0
+info: {title: Orders Events, version: "2.1"}
+channels:
+  orderRequests:
+    address: orders.requests
+    bindings:
+      amqp:
+        is: queue
+        queue: {name: orders.requests, durable: true}
+    messages:
+      OrderRequest: {$ref: "#/components/messages/OrderRequest"}
+  orderReplies:
+    address: null
+    messages:
+      OrderReply: {$ref: "#/components/messages/OrderReply"}
+  orderEvents:
+    address: orders.created
+    bindings:
+      amqp:
+        is: routingKey
+        exchange: {name: orders, type: topic, durable: true}
+    messages:
+      OrderCreated:
+        name: OrderCreated
+        contentType: application/json
+        payload: {$ref: "schemas/order.yaml"}
+operations:
+  placeOrder:
+    action: receive
+    channel: {$ref: "#/channels/orderRequests"}
+    messages: [{$ref: "#/channels/orderRequests/messages/OrderRequest"}]
+    reply:
+      channel: {$ref: "#/channels/orderReplies"}
+  publishOrderCreated:
+    action: send
+    channel: {$ref: "#/channels/orderEvents"}
+    bindings:
+      amqp: {deliveryMode: 2, priority: 3}
+components:
+  messages:
+    OrderRequest:
+      name: OrderRequest
+      contentType: application/json
+      payload:
+        type: object
+        required: [sku, qty]
+        properties:
+          sku: {type: string, minLength: 3}
+          qty: {type: integer, minimum: 1}
+      examples:
+        - name: big
+          payload: {sku: ABC-1, qty: 100}
+          headers: {x-tenant: acme}
+        - name: small
+          payload: {sku: ABC-1, qty: 1}
+    OrderReply:
+      name: OrderReply
+      contentType: application/json
+      payload:
+        schemaFormat: application/vnd.aai.asyncapi+json;version=3.0.0
+        schema:
+          type: object
+          required: [status]
+          properties:
+            status: {type: string, enum: [accepted, rejected]}
+            orderId: {type: string, format: uuid}
+      examples:
+        - name: big
+          payload: {status: rejected}
+        - name: small
+          payload: {status: accepted, orderId: "{{.UUID}}"}

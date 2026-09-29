@@ -1,0 +1,7 @@
+operation: updateNote
+examples:
+  updated:
+    response:
+      status: 200
+      body: |
+        {"id": {{.Request.Params.noteId}}, "title": {{json .Request.Body.title}}, "content": {{json .Request.Body.content}}, "status": {{json .Request.Body.status}}, "createdAt": "{{.Timestamp}}"}

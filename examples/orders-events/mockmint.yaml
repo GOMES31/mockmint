@@ -1,0 +1,18 @@
+# RabbitMQ mocks (run with --amqp-url or MOCKMINT_AMQP_URL).
+seed: 7
+clock: 2025-01-01T12:00:00Z
+
+async:
+  validation: strict
+  deadLetter:
+    exchange: orders.dlx            # invalid or unmatched messages end up in orders.dlx.queue
+  operations:
+    placeOrder:
+      # Default "auto" dispatch pairs request and reply examples by name:
+      # qty 500 → "bulk" (rejected), qty 1 → "single" (accepted). Any other
+      # valid order gets "accepted", the reply with no request example.
+      behavior:
+        latency: {min: 5ms, max: 20ms}
+    publishOrderCreated:
+      schedule: {interval: 5s, examples: [widget, gadget]}
+    consumePayments: {}             # sink: validate and ack; invalid → DLX

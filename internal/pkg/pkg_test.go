@@ -9,14 +9,13 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"testing"
 	"testing/fstest"
 	"time"
 )
 
-const petstore = "../../examples/petstore"
+const notebook = "../../examples/notebook"
 
 func loadOne(t *testing.T, dir string) *Package {
 	t.Helper()
@@ -41,9 +40,9 @@ func opByID(t *testing.T, p *Package, id string) *Operation {
 	return nil
 }
 
-func TestLoadPetstore(t *testing.T) {
-	p := loadOne(t, petstore)
-	if p.Name != "petstore" || p.Version != "1.0" || p.BasePath != "/petstore/1.0" || p.Seed != 42 {
+func TestLoadNotebook(t *testing.T) {
+	p := loadOne(t, notebook)
+	if p.Name != "notebook" || p.Version != "1.0" || p.BasePath != "/notebook/1.0" || p.Seed != 42 {
 		t.Fatalf("package = %s %s %q seed %d", p.Name, p.Version, p.BasePath, p.Seed)
 	}
 	if want := time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC); !p.Now().Equal(want) {
@@ -53,33 +52,30 @@ func TestLoadPetstore(t *testing.T) {
 		t.Fatalf("operations = %d", len(p.Operations))
 	}
 
-	get := opByID(t, p, "getPet")
+	get := opByID(t, p, "getNote")
 	if get.Validation != "strict" || get.Fallback == nil || get.Fallback.Status != 404 {
-		t.Fatalf("getPet = %+v", get)
+		t.Fatalf("getNote = %+v", get)
 	}
 
-	create := opByID(t, p, "createPet")
+	create := opByID(t, p, "createNote")
 	created := create.Responses["created"]
-	if created.Status != 201 || created.BodyTemplate == nil || len(created.HeaderTemplates) != 1 || created.HeaderTemplates[0].Name != "X-Created-Name" {
+	if created.Status != 201 || created.BodyTemplate == nil || len(created.HeaderTemplates) != 1 || created.HeaderTemplates[0].Name != "X-Created-Title" {
 		t.Fatalf("created = %+v", created)
 	}
-	nb := create.Responses["no-birds"]
-	if nb.Status != 422 || nb.MediaType != "application/problem+json" || nb.BodyTemplate != nil {
-		t.Fatalf("no-birds = %+v", nb)
+	rejected := create.Responses["publish-first"]
+	if rejected.Status != 422 || rejected.MediaType != "application/problem+json" || rejected.BodyTemplate != nil {
+		t.Fatalf("publish-first = %+v", rejected)
 	}
 
-	seq := opByID(t, p, "getOrderStatus")
-	if got := seq.ExampleNames(); !reflect.DeepEqual(got, []string{"approved", "delivered", "placed"}) {
-		t.Fatalf("sequence examples = %v", got)
-	}
-	if seq.Responses["placed"].MediaType != "application/json" {
-		t.Fatalf("media type not inferred: %q", seq.Responses["placed"].MediaType)
+	update := opByID(t, p, "updateNote")
+	if update.Responses["updated"].Status != 200 || update.Responses["updated"].BodyTemplate == nil {
+		t.Fatalf("update = %+v", update.Responses["updated"])
 	}
 }
 
 func TestLoadDirectoryOfPackages(t *testing.T) {
 	root := t.TempDir()
-	copyDir(t, petstore, filepath.Join(root, "petstore"))
+	copyDir(t, notebook, filepath.Join(root, "notebook"))
 	writeArchive(t, filepath.Join(root, "mini.zip"), "zip", map[string]string{
 		"mini/openapi.yaml": miniSpec,
 	})
@@ -177,7 +173,7 @@ func TestLoadErrors(t *testing.T) {
 		files map[string]string
 		want  string
 	}{
-		{"no spec", map[string]string{"mockmint.yaml": "name: x\n"}, "no OpenAPI document"},
+		{"no spec", map[string]string{"mockmint.yaml": "name: x\n"}, "no OpenAPI or AsyncAPI document"},
 		{"two specs", map[string]string{"a.yaml": spec, "b.yaml": spec}, "several OpenAPI documents"},
 		{"unknown manifest field", map[string]string{"openapi.yaml": spec, "mockmint.yaml": "nameee: x\n"}, "field nameee not found"},
 		{"unknown operation", map[string]string{"openapi.yaml": spec, "mockmint.yaml": "operations: {getNope: {}}\n"}, `"getNope" matches no operation`},

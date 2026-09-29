@@ -87,6 +87,9 @@ func TestLoadErrors(t *testing.T) {
 		{"unknown env", "", []string{"MOCKMINT_HTTP_PORT=1"}, "MOCKMINT_HTTP_PORT: unknown"},
 		{"bad env int", "", []string{"MOCKMINT_HTTP_MAXBODYBYTES=big"}, "MOCKMINT_HTTP_MAXBODYBYTES"},
 		{"nonpositive body", "", []string{"MOCKMINT_HTTP_MAXBODYBYTES=0"}, "maxBodyBytes"},
+		{"bad amqp url", "", []string{"MOCKMINT_AMQP_URL=http://x"}, "amqp.url"},
+		{"bad prefetch", "", []string{"MOCKMINT_AMQP_PREFETCH=0"}, "prefetch"},
+		{"bad reconnect", "amqp: {reconnectMin: 2s, reconnectMax: 1s}\n", nil, "reconnectMin"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

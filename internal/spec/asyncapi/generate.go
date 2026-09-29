@@ -184,9 +184,9 @@ func (g *generator) object(n *yaml.Node, at loc, depth int) (any, error) {
 }
 
 func (g *generator) array(n *yaml.Node, at loc, depth int) (any, error) {
-	count := max(min(uintOf(n, "minItems", 0), maxGenItems), 1)
+	count := max(min(uintOf(n, "minItems"), maxGenItems), 1)
 	if get(n, "maxItems") != nil {
-		count = min(count, min(uintOf(n, "maxItems", 0), maxGenItems))
+		count = min(count, min(uintOf(n, "maxItems"), maxGenItems))
 	}
 	items := get(n, "items")
 	out := make([]any, 0, count)
@@ -242,12 +242,12 @@ func (g *generator) str(n *yaml.Node) string {
 		return "https://example.com/" + g.word()
 	}
 	v := g.word()
-	minLen := min(uintOf(n, "minLength", 0), maxGenLength)
+	minLen := min(uintOf(n, "minLength"), maxGenLength)
 	for len(v) < minLen {
 		v += " " + g.word()
 	}
 	if get(n, "maxLength") != nil {
-		if maxLen := min(uintOf(n, "maxLength", 0), maxGenLength); len(v) > maxLen {
+		if maxLen := min(uintOf(n, "maxLength"), maxGenLength); len(v) > maxLen {
 			v = v[:maxLen]
 		}
 	}
@@ -291,10 +291,11 @@ func (g *generator) number(n *yaml.Node) float64 {
 	return v
 }
 
-func uintOf(n *yaml.Node, key string, def int) int {
+// uintOf reads a non-negative size keyword; absent is 0.
+func uintOf(n *yaml.Node, key string) int {
 	v := get(n, key)
 	if v == nil {
-		return def
+		return 0
 	}
 	i, err := strconv.ParseUint(v.Value, 10, 31)
 	if err != nil {

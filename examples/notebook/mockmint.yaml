@@ -1,0 +1,30 @@
+# Mounted at /notebook/1.0 (name/version default to the spec's info).
+validation: strict
+seed: 42                        # deterministic templates and faults
+clock: 2025-01-01T12:00:00Z     # frozen {{.Now}}
+
+operations:
+  # Auto dispatch pairs the path examples: GET /notes/1 -> welcome, /notes/2 -> ideas.
+  getNote:
+    fallback: {example: missing}      # any other id -> 404 example
+
+  listNotes:
+    dispatcher:
+      type: query_params
+      rules:
+        - when: {status: published}
+          example: published
+      default: all
+
+  createNote:
+    dispatcher:
+      type: body_jsonpath
+      rules:
+        - when: {"$.status": published}
+          example: publish-first
+      default: created
+
+  deleteNote:
+    behavior:
+      faults:
+        - {probability: 0.1, status: 503}

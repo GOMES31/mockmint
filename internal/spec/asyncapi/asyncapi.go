@@ -6,6 +6,7 @@ package asyncapi
 import (
 	"bytes"
 	"cmp"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -35,7 +36,7 @@ type Spec struct {
 // Channel is an addressable channel with its AMQP binding.
 type Channel struct {
 	ID      string // channel key
-	Address string // routing key or queue name
+	Address string // routing key or queue name; "" when unknown (3.0 null address)
 	AMQP    ChannelBinding
 }
 
@@ -320,7 +321,7 @@ func (l *loader) channelV3(n *yaml.Node, at loc) (*Channel, error) {
 		return nil, err
 	}
 	id := lastToken(rat.ptr)
-	addr := id
+	addr := "" // 3.0: absent or null means unknown (e.g. the reply_to of a request)
 	if cd.Address != nil {
 		addr = *cd.Address
 	}
@@ -372,8 +373,8 @@ func (l *loader) channel(id, addr string, bindings *yaml.Node, at loc) (*Channel
 		if err != nil {
 			return nil, err
 		}
-		if b.AMQP != nil {
-			if _, _, err := l.decode(b.AMQP, bat.child("amqp"), &c.AMQP); err != nil {
+		if b.AMQP.Kind != 0 {
+			if _, _, err := l.decode(&b.AMQP, bat.child("amqp"), &c.AMQP); err != nil {
 				return nil, err
 			}
 		}
@@ -396,10 +397,10 @@ func (l *loader) operationBinding(bindings *yaml.Node, at loc) (OperationBinding
 	}
 	var b bindingsDoc
 	_, bat, err := l.decode(bindings, at, &b)
-	if err != nil || b.AMQP == nil {
+	if err != nil || b.AMQP.Kind == 0 {
 		return ob, err
 	}
-	_, _, err = l.decode(b.AMQP, bat.child("amqp"), &ob)
+	_, _, err = l.decode(&b.AMQP, bat.child("amqp"), &ob)
 	return ob, err
 }
 
@@ -429,8 +430,8 @@ func (l *loader) message(n *yaml.Node, at loc, key string) (*Message, error) {
 		if err != nil {
 			return nil, err
 		}
-		if b.AMQP != nil {
-			if _, _, err := l.decode(b.AMQP, bat.child("amqp"), &m.AMQP); err != nil {
+		if b.AMQP.Kind != 0 {
+			if _, _, err := l.decode(&b.AMQP, bat.child("amqp"), &m.AMQP); err != nil {
 				return nil, err
 			}
 		}
@@ -446,7 +447,7 @@ func (l *loader) message(n *yaml.Node, at loc, key string) (*Message, error) {
 		if e.Name == "" {
 			e.Name = fmt.Sprintf("example%d", i+1)
 		}
-		if ex.Payload != nil {
+		if ex.Payload.Kind != 0 {
 			var v any
 			if err := ex.Payload.Decode(&v); err != nil {
 				return nil, fmt.Errorf("%s: example %q: %w", rat, e.Name, err)
@@ -505,14 +506,19 @@ func (l *loader) schema(n *yaml.Node, at loc, format, msgID string) (*Schema, er
 	return l.schemas.compile(l.docs, rn, rat)
 }
 
+// checkExample warns when an example does not match its schemas. Templated
+// examples are checked after rendering instead.
 func (l *loader) checkExample(m *Message, e Example) {
+	if raw, err := json.Marshal(e); err == nil && bytes.Contains(raw, []byte("{{")) {
+		return
+	}
 	if m.Payload != nil && e.HasPayload {
 		if v := m.Payload.Validate(e.Payload); v != nil {
 			l.warnf("message %s example %q does not match its payload schema: %s", m.ID, e.Name, v[0])
 		}
 	}
 	if m.Headers != nil && e.Headers != nil {
-		if v := m.Headers.Validate(map[string]any(e.Headers)); v != nil {
+		if v := m.Headers.Validate(e.Headers); v != nil {
 			l.warnf("message %s example %q does not match its headers schema: %s", m.ID, e.Name, v[0])
 		}
 	}

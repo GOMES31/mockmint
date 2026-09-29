@@ -22,6 +22,7 @@ import (
 
 	"github.com/mockmint/mockmint/internal/behavior"
 	"github.com/mockmint/mockmint/internal/dispatch"
+	"github.com/mockmint/mockmint/internal/spec/asyncapi"
 	"github.com/mockmint/mockmint/internal/spec/openapi"
 	"github.com/mockmint/mockmint/internal/template"
 )
@@ -41,8 +42,11 @@ type Package struct {
 	Source     string
 	Seed       int64
 	Clock      *time.Time
-	Spec       *openapi.Spec
+	Spec       *openapi.Spec // nil for AsyncAPI-only packages
 	Operations []*Operation
+
+	AsyncSpec *asyncapi.Spec // nil for OpenAPI-only packages
+	Async     *Async
 }
 
 // Operation is an OpenAPI operation with everything needed to serve it.
@@ -182,33 +186,47 @@ func isPackageDir(fsys fs.FS) bool {
 	if _, err := fs.Stat(fsys, ManifestFile); err == nil {
 		return true
 	}
-	_, err := findSpec(fsys)
-	return err == nil
+	found, err := findDocs(fsys)
+	return err == nil && (len(found.openapi) > 0 || len(found.asyncapi) > 0)
 }
 
-// findSpec returns the single top-level OpenAPI document in fsys.
-func findSpec(fsys fs.FS) (string, error) {
+type foundDocs struct{ openapi, asyncapi []string }
+
+// findDocs lists the top-level OpenAPI and AsyncAPI documents in fsys.
+func findDocs(fsys fs.FS) (foundDocs, error) {
+	var f foundDocs
 	entries, err := fs.ReadDir(fsys, ".")
 	if err != nil {
-		return "", err
+		return f, err
 	}
-	var found []string
 	for _, e := range entries {
 		if e.IsDir() || e.Name() == ManifestFile || !isSpecExt(e.Name()) {
 			continue
 		}
 		b, err := fs.ReadFile(fsys, e.Name())
-		if err == nil && openapi.IsDocument(b) {
-			found = append(found, e.Name())
+		if err != nil {
+			continue
+		}
+		switch {
+		case openapi.IsDocument(b):
+			f.openapi = append(f.openapi, e.Name())
+		case asyncapi.IsDocument(b):
+			f.asyncapi = append(f.asyncapi, e.Name())
 		}
 	}
-	switch len(found) {
-	case 0:
-		return "", errors.New("no OpenAPI document found (set spec in mockmint.yaml)")
-	case 1:
-		return found[0], nil
+	return f, nil
+}
+
+// pickDoc chooses the document of one kind: the manifest's choice, else the
+// single one found. "" means the package has none of that kind.
+func pickDoc(explicit string, found []string, kind, field string) (string, error) {
+	switch {
+	case explicit != "":
+		return explicit, nil
+	case len(found) <= 1:
+		return strings.Join(found, ""), nil
 	default:
-		return "", fmt.Errorf("several OpenAPI documents found (%s); set spec in mockmint.yaml", strings.Join(found, ", "))
+		return "", fmt.Errorf("several %s documents found (%s); set %s in mockmint.yaml", kind, strings.Join(found, ", "), field)
 	}
 }
 
@@ -244,24 +262,43 @@ func load(ctx context.Context, fsys fs.FS, source string, d Defaults, log *slog.
 		return nil, err
 	}
 
-	specName := m.Spec
-	if specName == "" {
-		var err error
-		if specName, err = findSpec(fsys); err != nil {
-			return nil, err
-		}
-	}
-	spec, err := openapi.Load(ctx, fsys, specName)
+	found, err := findDocs(fsys)
 	if err != nil {
 		return nil, err
 	}
+	specName, err := pickDoc(m.Spec, found.openapi, "OpenAPI", "spec")
+	if err != nil {
+		return nil, err
+	}
+	asyncName, err := pickDoc(m.AsyncAPI, found.asyncapi, "AsyncAPI", "asyncapi")
+	if err != nil {
+		return nil, err
+	}
+	if specName == "" && asyncName == "" {
+		return nil, errors.New("no OpenAPI or AsyncAPI document found (set spec or asyncapi in mockmint.yaml)")
+	}
 
-	pk := &Package{Source: source, Spec: spec, Clock: m.Clock, Seed: d.Seed}
+	pk := &Package{Source: source, Clock: m.Clock, Seed: d.Seed}
+	var title, version string
+	if specName != "" {
+		if pk.Spec, err = openapi.Load(ctx, fsys, specName); err != nil {
+			return nil, err
+		}
+		title, version = pk.Spec.Title, pk.Spec.Version
+	}
+	if asyncName != "" {
+		if pk.AsyncSpec, err = asyncapi.Load(fsys, asyncName); err != nil {
+			return nil, err
+		}
+		title, version = cmpOr(title, pk.AsyncSpec.Title), cmpOr(version, pk.AsyncSpec.Version)
+	} else if m.Async != nil {
+		return nil, errors.New("async is configured but the package has no AsyncAPI document")
+	}
 	if m.Seed != nil {
 		pk.Seed = *m.Seed
 	}
-	pk.Name = cmpOr(m.Name, slug(spec.Title))
-	pk.Version = cmpOr(m.Version, spec.Version)
+	pk.Name = cmpOr(m.Name, slug(title))
+	pk.Version = cmpOr(m.Version, version)
 	if pk.Name == "" {
 		return nil, errors.New("package name is empty: set name in mockmint.yaml or info.title in the spec")
 	}
@@ -282,8 +319,24 @@ func load(ctx context.Context, fsys fs.FS, source string, d Defaults, log *slog.
 		return nil, fmt.Errorf("templating %q: want auto, on or off", templating)
 	}
 
+	if pk.AsyncSpec != nil {
+		for _, w := range pk.AsyncSpec.Warnings {
+			log.Warn("asyncapi warning", "package", pk.Name, "warning", w)
+		}
+		if pk.Async, err = compileAsync(pk, m.Async, validation, templating); err != nil {
+			return nil, fmt.Errorf("async: %w", err)
+		}
+	}
+	if pk.Spec == nil {
+		if len(m.Operations) > 0 {
+			return nil, errors.New("operations configure HTTP operations but the package has no OpenAPI document (use async.operations)")
+		}
+		log.Info("package loaded", "package", pk.Name, "version", pk.Version, "asyncOperations", len(pk.Async.Operations), "source", source)
+		return pk, nil
+	}
+
 	byKey := map[string]*openapi.Operation{}
-	for _, o := range spec.Operations {
+	for _, o := range pk.Spec.Operations {
 		byKey[o.ID] = o
 		if o.OperationID != "" {
 			byKey[o.OperationID] = o
@@ -299,7 +352,7 @@ func load(ctx context.Context, fsys fs.FS, source string, d Defaults, log *slog.
 	}
 
 	var errs []error
-	for _, o := range spec.Operations {
+	for _, o := range pk.Spec.Operations {
 		ov, err := overridesFor(m.Operations, o)
 		if err != nil {
 			errs = append(errs, err)
@@ -318,7 +371,11 @@ func load(ctx context.Context, fsys fs.FS, source string, d Defaults, log *slog.
 	if err := errors.Join(errs...); err != nil {
 		return nil, err
 	}
-	log.Info("package loaded", "package", pk.Name, "version", pk.Version, "basePath", cmpOr(pk.BasePath, "/"), "operations", len(pk.Operations), "source", source)
+	attrs := []any{"package", pk.Name, "version", pk.Version, "basePath", cmpOr(pk.BasePath, "/"), "operations", len(pk.Operations)}
+	if pk.Async != nil {
+		attrs = append(attrs, "asyncOperations", len(pk.Async.Operations))
+	}
+	log.Info("package loaded", append(attrs, "source", source)...)
 	return pk, nil
 }
 
@@ -351,7 +408,13 @@ func compileOperation(pk *Package, m *Manifest, o *openapi.Operation, ov Operati
 	}
 
 	var err error
-	if cop.Behavior, err = behavior.Compile(behavior.Merge(m.Behavior, ov.Behavior), nil); err != nil {
+	bcfg := behavior.Merge(m.Behavior, ov.Behavior)
+	for i, f := range bcfg.Faults {
+		if f.Action == behavior.ActionDeadLetter {
+			return nil, fmt.Errorf("behavior: faults[%d]: action deadletter is for async operations", i)
+		}
+	}
+	if cop.Behavior, err = behavior.Compile(bcfg, nil); err != nil {
 		return nil, fmt.Errorf("behavior: %w", err)
 	}
 

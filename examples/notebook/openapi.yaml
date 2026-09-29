@@ -1,0 +1,124 @@
+openapi: 3.0.3
+info:
+  title: Notebook
+  version: "1.0"
+  description: Example CRUD API for notes. Responses are mocked; writes are not persisted.
+paths:
+  /notes:
+    get:
+      operationId: listNotes
+      parameters:
+        - name: status
+          in: query
+          schema: {type: string, enum: [draft, published]}
+          examples:
+            published: {value: published}
+        - name: limit
+          in: query
+          schema: {type: integer, minimum: 1, maximum: 100}
+      responses:
+        "200":
+          description: A list of notes.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: "#/components/schemas/Note"}
+              examples:
+                all:
+                  value:
+                    - {id: 1, title: Welcome, content: Start here., status: published}
+                    - {id: 2, title: Ideas, content: Draft ideas., status: draft}
+                published:
+                  value:
+                    - {id: 1, title: Welcome, content: Start here., status: published}
+    post:
+      operationId: createNote
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/NewNote"}
+      responses:
+        "201":
+          description: Created.
+          headers:
+            X-Created-Title:
+              schema: {type: string}
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Note"}
+        "422":
+          description: A new note must start as a draft.
+          content:
+            application/problem+json:
+              schema: {$ref: "#/components/schemas/Problem"}
+  /notes/{noteId}:
+    parameters:
+      - name: noteId
+        in: path
+        required: true
+        schema: {type: integer, minimum: 1}
+        examples:
+          welcome: {value: 1}
+          ideas: {value: 2}
+    get:
+      operationId: getNote
+      responses:
+        "200":
+          description: A note.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Note"}
+              examples:
+                welcome: {value: {id: 1, title: Welcome, content: Start here., status: published}}
+                ideas: {value: {id: 2, title: Ideas, content: Draft ideas., status: draft}}
+        "404":
+          description: Not found.
+          content:
+            application/problem+json:
+              schema: {$ref: "#/components/schemas/Problem"}
+              examples:
+                missing:
+                  value: {type: "about:blank", title: Not Found, status: 404, detail: No such note.}
+    put:
+      operationId: updateNote
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/NewNote"}
+      responses:
+        "200":
+          description: Updated note.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Note"}
+    delete:
+      operationId: deleteNote
+      responses:
+        "204": {description: Deleted.}
+components:
+  schemas:
+    NewNote:
+      type: object
+      required: [title, content, status]
+      properties:
+        title: {type: string, minLength: 1, maxLength: 100}
+        content: {type: string, minLength: 1}
+        status: {type: string, enum: [draft, published]}
+    Note:
+      allOf:
+        - {$ref: "#/components/schemas/NewNote"}
+        - type: object
+          required: [id]
+          properties:
+            id: {type: integer, minimum: 1}
+            createdAt: {type: string, format: date-time}
+    Problem:
+      type: object
+      properties:
+        type: {type: string}
+        title: {type: string}
+        status: {type: integer}
+        detail: {type: string}

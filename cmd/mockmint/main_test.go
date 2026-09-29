@@ -37,8 +37,8 @@ func TestVersionAndHelp(t *testing.T) {
 }
 
 func TestValidate(t *testing.T) {
-	code, out, errs := runCLI("validate", "../../examples/petstore")
-	if code != 0 || !strings.Contains(out, "ok  petstore 1.0  mounted at /petstore/1.0  5 operations, 0 warnings") {
+	code, out, errs := runCLI("validate", "../../examples/notebook")
+	if code != 0 || !strings.Contains(out, "ok  notebook 1.0  mounted at /notebook/1.0  5 operations, 0 warnings") {
 		t.Fatalf("validate = %d\nstdout: %s\nstderr: %s", code, out, errs)
 	}
 	dir := t.TempDir()
@@ -69,7 +69,7 @@ func TestServeProcess(t *testing.T) {
 	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
 		t.Fatalf("build: %v\n%s", err, out)
 	}
-	cmd := exec.Command(bin, "serve", "-addr", "127.0.0.1:0", "../../examples/petstore")
+	cmd := exec.Command(bin, "serve", "-addr", "127.0.0.1:0", "../../examples/notebook")
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -95,13 +95,13 @@ func TestServeProcess(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("server did not become ready")
 	}
-	resp, err := http.Get("http://" + a + "/petstore/1.0/pets/1")
+	resp, err := http.Get("http://" + a + "/notebook/1.0/notes/1")
 	if err != nil {
 		t.Fatal(err)
 	}
 	b, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
-	if resp.StatusCode != http.StatusOK || !strings.Contains(string(b), "Tom") {
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(b), "Welcome") {
 		t.Fatalf("GET = %d %s", resp.StatusCode, b)
 	}
 	if runtime.GOOS == "windows" {
