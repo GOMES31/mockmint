@@ -3,28 +3,39 @@ validation: strict
 seed: 42                        # deterministic templates and faults
 clock: 2025-01-01T12:00:00Z     # frozen {{.Now}}
 
-operations:
-  # Auto dispatch pairs the path examples: GET /notes/1 -> welcome, /notes/2 -> ideas.
-  getNote:
-    fallback: {example: missing}      # any other id -> 404 example
+# Notes live in mockmint's state store: POST creates, GET reads, PUT merges,
+# DELETE removes. These two exist from the start (seeded while the
+# collection is empty); reset them with DELETE /admin/state/notebook.
+initialState:
+  notes:
+    "1": {id: 1, title: Welcome, content: Start here., status: published, createdAt: "2025-01-01T09:00:00.000Z"}
+    "2": {id: 2, title: Ideas, content: Draft ideas., status: draft, createdAt: "2025-01-01T10:00:00.000Z"}
 
+operations:
   listNotes:
-    dispatcher:
-      type: query_params
-      rules:
-        - when: {status: published}
-          example: published
-      default: all
+    state:
+      action: list
+      collection: notes
+      where: {status: "{{.Request.Query.status}}"}   # ?status=published filters
 
   createNote:
     dispatcher:
       type: body_jsonpath
       rules:
         - when: {"$.status": published}
-          example: publish-first
+          example: publish-first                    # 422, state untouched
       default: created
+    state: {action: create, collection: notes, key: "{{.Response.id}}"}
+
+  getNote:
+    fallback: {example: missing}                    # unknown id -> 404 example
+    state: {action: read, collection: notes, key: "{{.Request.Params.noteId}}"}
+
+  updateNote:
+    state: {action: update, collection: notes, key: "{{.Request.Params.noteId}}"}  # shallow merge
 
   deleteNote:
+    state: {action: delete, collection: notes, key: "{{.Request.Params.noteId}}"}
     behavior:
       faults:
         - {probability: 0.1, status: 503}

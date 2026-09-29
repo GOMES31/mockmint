@@ -69,7 +69,7 @@ func TestServeProcess(t *testing.T) {
 	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
 		t.Fatalf("build: %v\n%s", err, out)
 	}
-	cmd := exec.Command(bin, "serve", "-addr", "127.0.0.1:0", "../../examples/notebook")
+	cmd := exec.Command(bin, "serve", "-addr", "127.0.0.1:0", "-admin-addr", "127.0.0.1:0", "../../examples/notebook")
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -85,7 +85,7 @@ func TestServeProcess(t *testing.T) {
 		for sc.Scan() {
 			var line map[string]any
 			if json.Unmarshal(sc.Bytes(), &line) == nil && line["msg"] == "mockmint ready" {
-				addr <- line["addr"].(string)
+				addr <- line["addr"].(string) + " " + line["admin"].(string)
 			}
 		}
 	}()
@@ -95,7 +95,7 @@ func TestServeProcess(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("server did not become ready")
 	}
-	resp, err := http.Get("http://" + a + "/notebook/1.0/notes/1")
+	resp, err := http.Get("http://" + strings.Fields(a)[0] + "/notebook/1.0/notes/1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,6 +103,17 @@ func TestServeProcess(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusOK || !strings.Contains(string(b), "Welcome") {
 		t.Fatalf("GET = %d %s", resp.StatusCode, b)
+	}
+	adminAddr := strings.Fields(a)[1]
+	for path, want := range map[string]int{"/readyz": 200, "/metrics": 200, "/admin/packages": 200} {
+		resp, err := http.Get("http://" + adminAddr + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != want {
+			t.Fatalf("admin %s = %d", path, resp.StatusCode)
+		}
 	}
 	if runtime.GOOS == "windows" {
 		return // no SIGINT delivery to child processes; shutdown is covered by the server tests

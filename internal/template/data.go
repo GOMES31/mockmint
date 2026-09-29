@@ -27,6 +27,10 @@ type Data struct {
 	Operation string
 	Example   string
 	Fake      Fake
+	// Response is the decoded response body, set only while evaluating a
+	// stateful create operation's key (e.g. "{{.Response.id}}").
+	Response any
+	State    State
 
 	rng *rand.Rand
 	now time.Time

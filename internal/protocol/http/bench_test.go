@@ -10,7 +10,7 @@ import (
 // BenchmarkServe measures the in-process request path (no network) for a
 // static example, a templated example, and a strictly validated POST.
 func BenchmarkServe(b *testing.B) {
-	rt, err := NewRouter(loadNotebookB(b), 1<<20, nil)
+	rt, err := NewRouter(loadNotebookB(b), RouterOptions{MaxBodyBytes: 1 << 20})
 	if err != nil {
 		b.Fatal(err)
 	}

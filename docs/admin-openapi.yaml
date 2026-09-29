@@ -1,0 +1,270 @@
+openapi: 3.1.0
+info:
+  title: mockmint admin API
+  version: "1"
+  description: |
+    Served on admin.addr (default 127.0.0.1:9090). /healthz, /readyz and /metrics are
+    open; /admin/* requires `Authorization: Bearer <admin.token>` when a token
+    is configured. Errors are RFC 9457 application/problem+json.
+security:
+  - bearer: []
+paths:
+  /healthz:
+    get:
+      operationId: healthz
+      summary: Liveness. Always 200 while the process serves requests.
+      security: []
+      responses:
+        "200": {$ref: "#/components/responses/Status"}
+  /readyz:
+    get:
+      operationId: readyz
+      summary: Readiness.
+      description: |
+        503 until packages have loaded once, and while a configured RabbitMQ
+        broker is disconnected for packages with async operations. No broker
+        configured is not a failure.
+      security: []
+      responses:
+        "200": {$ref: "#/components/responses/Status"}
+        "503": {$ref: "#/components/responses/Status"}
+  /metrics:
+    get:
+      operationId: metrics
+      summary: Prometheus metrics (text exposition format 0.0.4).
+      security: []
+      responses:
+        "200":
+          description: Metrics.
+          content:
+            text/plain: {schema: {type: string}}
+  /admin/info:
+    get:
+      operationId: info
+      summary: Version, readiness and broker state.
+      responses:
+        "200":
+          description: Info.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  version: {type: string}
+                  ready: {type: boolean}
+                  reason: {type: string}
+                  packages: {type: integer}
+                  amqp: {type: string, enum: [disabled, connected, disconnected]}
+        "401": {$ref: "#/components/responses/Problem"}
+  /admin/packages:
+    get:
+      operationId: listPackages
+      responses:
+        "200":
+          description: Live packages.
+          content:
+            application/json:
+              schema: {type: array, items: {$ref: "#/components/schemas/PackageSummary"}}
+        "401": {$ref: "#/components/responses/Problem"}
+  /admin/packages/{name}:
+    parameters:
+      - {name: name, in: path, required: true, schema: {type: string}}
+    get:
+      operationId: getPackage
+      responses:
+        "200":
+          description: Package detail.
+          content:
+            application/json: {schema: {$ref: "#/components/schemas/PackageDetail"}}
+        "404": {$ref: "#/components/responses/Problem"}
+    put:
+      operationId: putPackage
+      summary: Upload or replace a package archive, then reload atomically.
+      description: |
+        The archive's package name must equal {name}. Packages from
+        packages.paths cannot be replaced (409). An invalid archive, or one
+        that makes the package set invalid, changes nothing (422).
+      requestBody:
+        required: true
+        content:
+          application/zip: {schema: {type: string, contentEncoding: binary}}
+          application/gzip: {schema: {type: string, contentEncoding: binary}}
+      responses:
+        "200": {description: Replaced., content: {application/json: {schema: {$ref: "#/components/schemas/PackageDetail"}}}}
+        "201": {description: Created., content: {application/json: {schema: {$ref: "#/components/schemas/PackageDetail"}}}}
+        "409": {$ref: "#/components/responses/Problem"}
+        "413": {$ref: "#/components/responses/Problem"}
+        "415": {$ref: "#/components/responses/Problem"}
+        "422": {$ref: "#/components/responses/Problem"}
+    delete:
+      operationId: deletePackage
+      summary: Delete an uploaded package, then reload.
+      responses:
+        "204": {description: Deleted.}
+        "404": {$ref: "#/components/responses/Problem"}
+        "409": {$ref: "#/components/responses/Problem"}
+  /admin/reload:
+    post:
+      operationId: reload
+      summary: Reload every package from disk and uploads; atomic.
+      responses:
+        "200":
+          description: The new live packages.
+          content:
+            application/json:
+              schema: {type: array, items: {$ref: "#/components/schemas/PackageSummary"}}
+        "422": {$ref: "#/components/responses/Problem"}
+  /admin/traffic:
+    get:
+      operationId: listTraffic
+      summary: Recent HTTP and AMQP exchanges, newest first, sensitive headers redacted.
+      parameters:
+        - {name: package, in: query, schema: {type: string}}
+        - {name: protocol, in: query, schema: {type: string, enum: [http, amqp]}}
+        - {name: limit, in: query, schema: {type: integer, minimum: 0}}
+      responses:
+        "200":
+          description: Exchanges.
+          content:
+            application/json:
+              schema: {type: array, items: {$ref: "#/components/schemas/Exchange"}}
+        "400": {$ref: "#/components/responses/Problem"}
+    delete:
+      operationId: clearTraffic
+      responses:
+        "204": {description: Cleared.}
+  /admin/state/{package}:
+    parameters:
+      - {name: package, in: path, required: true, schema: {type: string}}
+    get:
+      operationId: getState
+      parameters:
+        - {name: collection, in: query, schema: {type: string}}
+      responses:
+        "200":
+          description: Stored entries, sorted by collection then key.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    collection: {type: string}
+                    key: {type: string}
+                    value: {}
+    delete:
+      operationId: clearState
+      summary: Clear a package's state and re-seed its initialState.
+      responses:
+        "204": {description: Cleared.}
+  /admin/recordings/{package}:
+    parameters:
+      - {name: package, in: path, required: true, schema: {type: string}}
+    get:
+      operationId: getRecordings
+      summary: Proxied exchanges as mockmint example files.
+      description: YAML documents, one per operation, ready for examples/; JSON with ?format=json.
+      parameters:
+        - {name: format, in: query, schema: {type: string, enum: [yaml, json]}}
+      responses:
+        "200":
+          description: Example files.
+          content:
+            application/yaml: {schema: {type: string}}
+            application/json: {schema: {type: array, items: {type: object}}}
+    delete:
+      operationId: clearRecordings
+      responses:
+        "204": {description: Cleared.}
+  /admin/async/{package}/{channel}/publish:
+    parameters:
+      - {name: package, in: path, required: true, schema: {type: string}}
+      - {name: channel, in: path, required: true, description: Channel id or address., schema: {type: string}}
+    post:
+      operationId: publish
+      summary: Publish an example of a send operation now.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                example: {type: string, description: "Default: the schedule's first example, else the first by name."}
+                operation: {type: string, description: Needed when the channel has several send operations.}
+      responses:
+        "202":
+          description: Published and confirmed by the broker.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  operation: {type: string}
+                  example: {type: string}
+                  status: {type: string}
+        "404": {$ref: "#/components/responses/Problem"}
+        "409": {$ref: "#/components/responses/Problem"}
+        "503": {$ref: "#/components/responses/Problem"}
+components:
+  securitySchemes:
+    bearer: {type: http, scheme: bearer}
+  responses:
+    Status:
+      description: Probe status.
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              status: {type: string}
+              reason: {type: string}
+    Problem:
+      description: RFC 9457 problem.
+      content:
+        application/problem+json: {schema: {$ref: "#/components/schemas/Problem"}}
+  schemas:
+    Problem:
+      type: object
+      properties:
+        type: {type: string}
+        title: {type: string}
+        status: {type: integer}
+        detail: {type: string}
+        instance: {type: string}
+    PackageSummary:
+      type: object
+      properties:
+        name: {type: string}
+        version: {type: string}
+        basePath: {type: string}
+        source: {type: string}
+        origin: {type: string, enum: [static, uploaded]}
+        operations: {type: integer}
+        asyncOperations: {type: integer}
+        proxy: {type: string}
+    PackageDetail:
+      allOf:
+        - {$ref: "#/components/schemas/PackageSummary"}
+        - type: object
+          properties:
+            http: {type: array, items: {type: object}}
+            async: {type: array, items: {type: object}}
+    Exchange:
+      type: object
+      properties:
+        id: {type: integer}
+        time: {type: string, format: date-time}
+        protocol: {type: string}
+        package: {type: string}
+        operation: {type: string}
+        example: {type: string}
+        durationNs: {type: integer}
+        method: {type: string}
+        path: {type: string}
+        status: {type: integer}
+        outcome: {type: string}
+        requestHeaders: {type: object, additionalProperties: {type: string}}
+        requestBody: {type: string}
+        responseBody: {type: string}
+        truncated: {type: boolean}

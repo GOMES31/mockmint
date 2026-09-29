@@ -20,7 +20,10 @@ FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=build /out/mockmint /mockmint
 COPY examples /examples
 USER nonroot:nonroot
-EXPOSE 8080
-ENV MOCKMINT_HTTP_ADDR=:8080
+# 8080: mocks; 9090: admin API. The admin API defaults to loopback; the image
+# opens it so probes and scrapers reach /healthz, /readyz and /metrics. Set
+# MOCKMINT_ADMIN_TOKEN wherever /admin/* is reachable.
+EXPOSE 8080 9090
+ENV MOCKMINT_HTTP_ADDR=:8080 MOCKMINT_ADMIN_ADDR=:9090
 ENTRYPOINT ["/mockmint"]
 CMD ["serve", "/examples"]

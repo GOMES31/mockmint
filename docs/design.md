@@ -123,6 +123,10 @@ Windows 11, Ryzen 5 5600, Go 1.27, `-trimpath -ldflags="-s -w"`:
 Linux RSS inside the distroless image is still to be confirmed where Docker
 is available.
 
+After Phase 3 (admin listener, both example packages, Windows): idle
+working set 17.0–17.3 MB over three runs, peak under 20 MB after 1,500
+requests; startup 29 ms; linux/amd64 binary 14.2 MB.
+
 ## Determinism
 
 Each request gets a `rand.Rand` seeded from `hash(seed, operation, canonical
@@ -201,3 +205,90 @@ integration tests (`//go:build integration`).
 `latency` applies before replying. Faults take `action: drop` (ack, never
 reply: a lost reply) or `action: deadletter`; `status` faults and `rateLimit`
 are HTTP-only and rejected for async operations at load time.
+
+# Phase 3: admin API, state, proxy and hot reload
+
+## Runtime and hot reload
+
+`internal/app` owns the live package set. A reload loads every package
+(configured paths plus uploaded archives), builds the HTTP router and plans
+the RabbitMQ topology **before** touching anything live. Only when all of that
+succeeds does it swap the router (an atomic pointer, as in Phase 1) and
+replace the AMQP engine (start the new one, stop the old one: topology
+declarations are idempotent, and in-flight messages of the old engine are
+acked or requeued). A failed reload changes nothing and reports every error.
+
+Triggers: `POST /admin/reload`, `SIGHUP`, uploading or deleting a package.
+There is no file watcher: Kubernetes ConfigMap updates arrive by symlink swap,
+and an explicit reload (or a sidecar calling it) is simpler and deterministic.
+
+Uploaded packages are kept in memory and, when `admin.dataDir` is set,
+written there so they survive restarts. A package from `packages.paths` cannot
+be replaced or deleted through the API (409): the files are the source of
+truth.
+
+## State
+
+`internal/state` defines a `Store` interface (namespace = package, then
+collection and key) with a bounded in-memory implementation. Values are
+stored as JSON bytes, so callers never share mutable values. State survives
+reloads of a package with the same name and is cleared through the admin API.
+
+Operations opt in declaratively; no Go code and no template gymnastics for
+the common CRUD shape:
+
+```yaml
+operations:
+  createNote: {state: {action: create, collection: notes, key: "{{.Response.id}}"}}
+  getNote:    {state: {action: read,   collection: notes, key: "{{.Request.Params.noteId}}"}}
+  updateNote: {state: {action: update, collection: notes, key: "{{.Request.Params.noteId}}"}}
+  deleteNote: {state: {action: delete, collection: notes, key: "{{.Request.Params.noteId}}"}}
+  listNotes:  {state: {action: list,   collection: notes}}
+```
+
+| action | behavior |
+|---|---|
+| create | render the example as usual, then store the **response body** under `key` (evaluated with `.Response`, the decoded body), so GET returns exactly what POST did |
+| read | found → the example's status and headers with the stored value as body; missing → fallback, else 404 problem |
+| update | missing → as read; found → store `merge` (shallow merge of the request body, default), `request` or `response`, respond with the stored value |
+| delete | missing → as read; found → remove, respond with the example |
+| list | the example's status with a JSON array of the collection's values, in key order |
+
+Templates also get `.State.Value` (read/update) and `.State.Get`/`.State.List`.
+Stateful operations still validate and dispatch normally; state applies to
+the chosen 2xx example (error examples are returned untouched).
+
+## Proxy and recorder
+
+A package can set `proxy: {url, on: [unmatchedRoute, noExample]}`. Requests
+under the package base path that match no operation, and/or requests whose
+dispatcher finds no example, are forwarded (base path stripped) instead of
+getting a 404. Proxied exchanges for known operations are recorded (bounded)
+and exported by the admin API **as example files** in mockmint's own format,
+so recording against a live service bootstraps a package.
+
+## Admin API
+
+A separate listener (`admin.addr`, default `127.0.0.1:9090`: management is
+local unless explicitly exposed, and a non-loopback listener without a token
+logs a warning; the Docker image sets `:9090` for probes). `/healthz`, `/readyz`
+and `/metrics` are unauthenticated (probes and scrapers); `/admin/*` requires
+`Authorization: Bearer <admin.token>` when a token is set (constant-time
+compare). Errors are problem+json. The API itself is described in
+`docs/admin-openapi.yaml`, which the tests load with mockmint's own OpenAPI
+loader.
+
+Readiness: 503 until the first successful load, and while a configured broker
+is disconnected for packages that have async operations. No broker
+configured is not a failure (Phase 2's graceful degradation).
+
+## Observability
+
+- **Metrics:** a small in-tree Prometheus text-format registry (counters,
+  gauges, histograms with fixed label sets) instead of `client_golang`, which
+  would add ~2.5 MB and a dependency tree for a few series. Labels are bounded
+  by the specs (package, operation, status).
+- **Traffic:** a fixed-size ring buffer of recent HTTP and AMQP exchanges.
+  Sensitive headers (`Authorization`, `Cookie`, `Set-Cookie`,
+  `Proxy-Authorization`, `X-Api-Key`, plus `admin.redactHeaders`) are
+  replaced with `[REDACTED]`; bodies are truncated to 4 KiB.

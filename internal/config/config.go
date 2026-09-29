@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/url"
 	"os"
 	"reflect"
@@ -25,6 +26,7 @@ const EnvPrefix = "MOCKMINT"
 // Config is the server configuration.
 type Config struct {
 	HTTP     HTTP     `yaml:"http"`
+	Admin    Admin    `yaml:"admin"`
 	AMQP     AMQP     `yaml:"amqp"`
 	Log      Log      `yaml:"log"`
 	Packages Packages `yaml:"packages"`
@@ -38,6 +40,38 @@ type HTTP struct {
 	IdleTimeout       Duration `yaml:"idleTimeout"`
 	ShutdownTimeout   Duration `yaml:"shutdownTimeout"`
 	MaxBodyBytes      int64    `yaml:"maxBodyBytes"`
+}
+
+// Admin configures the admin API listener (health, metrics, management).
+type Admin struct {
+	Addr string `yaml:"addr"` // "" disables the admin listener
+	// Token, when set, is required as "Authorization: Bearer <token>" on
+	// /admin/*. Health, readiness and metrics stay open for probes.
+	Token string `yaml:"token"`
+	// DataDir persists uploaded packages across restarts ("" = memory only).
+	DataDir        string   `yaml:"dataDir"`
+	MaxUploadBytes int64    `yaml:"maxUploadBytes"`
+	TrafficSize    int      `yaml:"trafficSize"`   // recent exchanges kept
+	RedactHeaders  []string `yaml:"redactHeaders"` // in addition to the defaults
+	RecordLimit    int      `yaml:"recordLimit"`   // proxied recordings kept per package
+}
+
+// Exposed reports whether the admin listener is reachable from other hosts:
+// any address that is not a loopback IP or "localhost". Unparsable
+// addresses count as exposed.
+func (a Admin) Exposed() bool {
+	if a.Addr == "" {
+		return false
+	}
+	host, _, err := net.SplitHostPort(a.Addr)
+	if err != nil {
+		return true
+	}
+	if host == "localhost" {
+		return false
+	}
+	ip := net.ParseIP(host)
+	return ip == nil || !ip.IsLoopback()
 }
 
 // AMQP configures the RabbitMQ engine. With an empty URL the engine is off
@@ -79,6 +113,12 @@ func Default() Config {
 			IdleTimeout:       Duration(60 * time.Second),
 			ShutdownTimeout:   Duration(10 * time.Second),
 			MaxBodyBytes:      10 << 20,
+		},
+		Admin: Admin{
+			Addr:           "127.0.0.1:9090",
+			MaxUploadBytes: 64 << 20,
+			TrafficSize:    200,
+			RecordLimit:    100,
 		},
 		AMQP: AMQP{
 			Prefetch:       10,
@@ -127,6 +167,13 @@ func (c Config) Validate() error {
 		if u, err := url.Parse(c.AMQP.URL); err != nil || (u.Scheme != "amqp" && u.Scheme != "amqps") {
 			errs = append(errs, errors.New("amqp.url must be an amqp:// or amqps:// URL"))
 		}
+	}
+	// Port 0 picks a free port, so equal ":0" addresses do not collide.
+	if c.Admin.Addr != "" && c.Admin.Addr == c.HTTP.Addr && !strings.HasSuffix(c.Admin.Addr, ":0") {
+		errs = append(errs, errors.New("admin.addr must differ from http.addr"))
+	}
+	if c.Admin.MaxUploadBytes <= 0 || c.Admin.TrafficSize < 1 || c.Admin.RecordLimit < 1 {
+		errs = append(errs, errors.New("admin.maxUploadBytes, trafficSize and recordLimit must be positive"))
 	}
 	if c.AMQP.Prefetch < 1 || c.AMQP.Prefetch > 65535 {
 		errs = append(errs, errors.New("amqp.prefetch must be between 1 and 65535"))

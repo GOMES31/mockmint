@@ -4,8 +4,8 @@ Lightweight API and RabbitMQ mocking from OpenAPI and AsyncAPI specs and
 example files: a single static binary (~14 MB), ~20 ms startup, under 20 MB
 resident at idle. No Go code per mock.
 
-> Status: **Phases 1–2 (HTTP core, RabbitMQ engine)**. The admin API, state
-> and proxying (Phase 3) and contract testing (Phase 4) are not built yet.
+> Status: **Phases 1–3** (HTTP core, RabbitMQ engine, admin API with state,
+> proxying and hot reload). Contract testing (Phase 4) is not built yet.
 
 ## Quick start
 
@@ -20,6 +20,8 @@ curl -i localhost:8080/notebook/1.0/notes -H 'Content-Type: application/json' \
 curl -i -X PUT localhost:8080/notebook/1.0/notes/1 -H 'Content-Type: application/json' \
      -d '{"title":"Meeting","content":"Updated agenda","status":"published"}'  # update
 curl -i -X DELETE localhost:8080/notebook/1.0/notes/1  # delete
+
+curl localhost:9090/admin/packages                   # admin API (see below)
 ```
 
 Docker (distroless, non-root, amd64/arm64):
@@ -32,8 +34,8 @@ docker run -p 8080:8080 -v "$PWD/my-mocks:/mocks:ro" mockmint:dev serve /mocks
 `mockmint validate <paths...>` loads packages and exits non-zero on errors,
 so it works as a CI lint step for mock definitions.
 
-The Notebook example demonstrates CRUD responses. Mockmint does not persist
-created, updated, or deleted notes; stateful mocking is planned for Phase 3.
+The Notebook example is stateful: a note you create can be read, listed,
+updated and deleted afterwards (see [State](#state)).
 
 RabbitMQ (see [RabbitMQ mocks](#rabbitmq-mocks-asyncapi)):
 
@@ -286,6 +288,100 @@ redeclares the topology, and resumes consumers and schedules. Without
 `amqp.url` the engine is off and HTTP runs alone; a configured broker that is
 down never blocks startup.
 
+## State
+
+Operations can read and write a per-package store, so create → read →
+update → delete flows behave like a real service. No code, and no template
+tricks for the common CRUD shape:
+
+```yaml
+initialState:                # seeded while a collection is empty
+  notes:
+    "1": {id: 1, title: Welcome, status: published}
+
+operations:
+  createNote: {state: {action: create, collection: notes, key: "{{.Response.id}}"}}
+  getNote:    {state: {action: read,   collection: notes, key: "{{.Request.Params.noteId}}"}}
+  updateNote: {state: {action: update, collection: notes, key: "{{.Request.Params.noteId}}"}}
+  deleteNote: {state: {action: delete, collection: notes, key: "{{.Request.Params.noteId}}"}}
+  listNotes:
+    state:
+      action: list
+      collection: notes
+      where: {status: "{{.Request.Query.status}}"}   # empty value = no filter
+```
+
+| action | behavior |
+|---|---|
+| `create` | renders the example as usual, then stores the **response body** under `key` (which can use `.Response`, the decoded body), so a later GET returns exactly what POST did |
+| `read` | the stored value as the body, with the example's status and headers; a missing key gets the operation's fallback, else a 404 problem |
+| `update` | missing key as for read; otherwise stores `value: merge` (shallow merge of the request body, default), `request` or `response`, and returns the stored value |
+| `delete` | missing key as for read; otherwise removes it and returns the example (e.g. 204) |
+| `list` | a JSON array of the collection's values in key order (numeric keys numerically), filtered by `where` |
+
+State changes only happen on 2xx examples: an error example chosen by a
+dispatcher (a 422 rule, say) leaves state untouched. Templates can also read
+state with `.State.Value`, `.State.Get "notes" "1"` and `.State.List "notes"`.
+
+State lives in memory (10k keys per package, 1 MiB per value), survives
+reloads, and can be inspected or reset through the admin API; resetting
+re-seeds `initialState`.
+
+## Proxy and recording
+
+A package can forward what it cannot answer to a live service:
+
+```yaml
+proxy:
+  url: https://staging.example.com/api   # the package base path is stripped
+  on: [unmatchedRoute, noExample]        # default: both
+  timeout: 30s
+  record: true                           # default
+```
+
+`unmatchedRoute` forwards requests under the package's base path that match
+no operation (including undeclared methods); `noExample` forwards requests to
+a known operation when no example matches, instead of the fallback. Upstream
+failures return `502` problems.
+
+Proxied responses of known operations are **recorded** and exported by
+`GET /admin/recordings/{package}` as example files in mockmint's own format,
+ready to drop into `examples/`, so a session against a real service
+bootstraps a mock package.
+
+## Admin API
+
+A second listener (`admin.addr`, default `127.0.0.1:9090`, so only the local
+machine can reach it; `-admin-addr off` disables it). To expose it, e.g.
+`-admin-addr :9090`, set `admin.token` too: mockmint warns at startup when a
+non-loopback admin listener has no token. The Docker image listens on `:9090`
+so probes and scrapers work. The full contract is [docs/admin-openapi.yaml](docs/admin-openapi.yaml).
+
+| endpoint | |
+|---|---|
+| `GET /healthz`, `GET /readyz` | liveness; readiness is 503 until packages load and while a configured broker is disconnected |
+| `GET /metrics` | Prometheus: requests, latency histograms, AMQP messages and publishes, broker connection, reloads, Go runtime |
+| `GET /admin/packages[/{name}]` | live packages, operations, examples, state and proxy settings |
+| `PUT /admin/packages/{name}` | upload a `.zip` (`application/zip`) or `.tar.gz` (`application/gzip`) package and reload; `201`/`200` |
+| `DELETE /admin/packages/{name}` | remove an uploaded package and reload |
+| `POST /admin/reload` | reload everything from disk (also `SIGHUP` on Unix) |
+| `GET`/`DELETE /admin/traffic` | recent HTTP and AMQP exchanges, newest first; `?package=&protocol=&limit=` |
+| `GET`/`DELETE /admin/state/{package}` | stored entries (`?collection=`); delete resets and re-seeds |
+| `GET`/`DELETE /admin/recordings/{package}` | recorded examples as YAML (`?format=json`) |
+| `POST /admin/async/{package}/{channel}/publish` | publish an example now: `{"example": "gadget"}`; `channel` is the id or address |
+
+**Reloads are atomic**: every package is loaded, routed and planned before
+anything live changes, so a broken package returns `422` with every error and
+the previous set keeps serving. Packages from `packages.paths` cannot be
+replaced or deleted through the API (`409`); uploads are kept in memory, and
+in `admin.dataDir` when set, so they survive restarts.
+
+With `admin.token` set, `/admin/*` requires `Authorization: Bearer <token>`;
+`/healthz`, `/readyz` and `/metrics` stay open for probes and scrapers. The
+traffic buffer hides `Authorization`, `Cookie`, `Set-Cookie`,
+`Proxy-Authorization` and `X-Api-Key` (plus `admin.redactHeaders`) and keeps
+at most 4 KiB of each body.
+
 ## Server configuration
 
 `mockmint serve -config mockmint-server.yaml`, and/or `MOCKMINT_*`
@@ -299,6 +395,14 @@ http:
   idleTimeout: 60s
   shutdownTimeout: 10s
   maxBodyBytes: 10485760
+admin:
+  addr: "127.0.0.1:9090"  # "" disables the admin API; ":9090" exposes it
+  token: ""          # set it (MOCKMINT_ADMIN_TOKEN) anywhere the port is reachable
+  dataDir: ""        # persist uploaded packages here
+  maxUploadBytes: 67108864
+  trafficSize: 200   # exchanges kept
+  redactHeaders: []  # added to the built-in list
+  recordLimit: 100   # proxied recordings kept per package
 amqp:
   url: ""           # amqp://user:pass@host:5672/vhost; empty = HTTP only
   prefetch: 10      # unacked messages per consumer

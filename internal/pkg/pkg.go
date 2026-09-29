@@ -45,6 +45,10 @@ type Package struct {
 	Spec       *openapi.Spec // nil for AsyncAPI-only packages
 	Operations []*Operation
 
+	Proxy *Proxy // nil: no upstream
+	// InitialState is applied with SeedState: collection → key → value.
+	InitialState map[string]map[string]any
+
 	AsyncSpec *asyncapi.Spec // nil for OpenAPI-only packages
 	Async     *Async
 }
@@ -57,6 +61,7 @@ type Operation struct {
 	Behavior   *behavior.Behavior
 	Responses  map[string]*Response // by example name
 	Fallback   *Response            // nil: 404 problem
+	State      *StateOp             // nil: stateless
 }
 
 // Response is a compiled example response. BodyTemplate is nil when the
@@ -328,6 +333,9 @@ func load(ctx context.Context, fsys fs.FS, source string, d Defaults, log *slog.
 		}
 	}
 	if pk.Spec == nil {
+		if m.Proxy != nil {
+			return nil, errors.New("proxy needs an OpenAPI document")
+		}
 		if len(m.Operations) > 0 {
 			return nil, errors.New("operations configure HTTP operations but the package has no OpenAPI document (use async.operations)")
 		}
@@ -335,6 +343,18 @@ func load(ctx context.Context, fsys fs.FS, source string, d Defaults, log *slog.
 		return pk, nil
 	}
 
+	if pk.Proxy, err = compileProxy(m.Proxy); err != nil {
+		return nil, err
+	}
+	for col, entries := range m.InitialState {
+		if pk.InitialState == nil {
+			pk.InitialState = map[string]map[string]any{}
+		}
+		pk.InitialState[col] = map[string]any{}
+		for k, v := range entries {
+			pk.InitialState[col][k] = normalize(v)
+		}
+	}
 	byKey := map[string]*openapi.Operation{}
 	for _, o := range pk.Spec.Operations {
 		byKey[o.ID] = o
@@ -406,8 +426,11 @@ func compileOperation(pk *Package, m *Manifest, o *openapi.Operation, ov Operati
 	if err := checkValidation(cop.Validation); err != nil {
 		return nil, err
 	}
-
 	var err error
+	if cop.State, err = compileState(o.ID, ov.State); err != nil {
+		return nil, err
+	}
+
 	bcfg := behavior.Merge(m.Behavior, ov.Behavior)
 	for i, f := range bcfg.Faults {
 		if f.Action == behavior.ActionDeadLetter {

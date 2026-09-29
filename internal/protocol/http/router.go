@@ -2,16 +2,20 @@
 package http
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/http/httputil"
 	"regexp"
 	"slices"
 	"strconv"
 	"strings"
 
+	"github.com/mockmint/mockmint/internal/observability"
 	"github.com/mockmint/mockmint/internal/pkg"
 	"github.com/mockmint/mockmint/internal/problem"
+	"github.com/mockmint/mockmint/internal/state"
 )
 
 // Router is an immutable routing table for a set of packages. Build a new
@@ -21,6 +25,25 @@ type Router struct {
 	log          *slog.Logger
 	maxBodyBytes int64
 	packages     []*pkg.Package
+
+	state    state.Store
+	traffic  *observability.Traffic
+	metrics  *observability.Metrics
+	recorder *Recorder
+	proxies  map[*pkg.Package]*httputil.ReverseProxy
+}
+
+// RouterOptions are a Router's dependencies. Only MaxBodyBytes is required; a nil
+// State gets a private in-memory store, and nil Traffic, Metrics or
+// Recorder disable that feature. State, Traffic, Metrics and Recorder are
+// shared across reloads by passing the same values to each new Router.
+type RouterOptions struct {
+	MaxBodyBytes int64
+	Log          *slog.Logger
+	State        state.Store
+	Traffic      *observability.Traffic
+	Metrics      *observability.Metrics
+	Recorder     *Recorder
 }
 
 // route is one OpenAPI path template.
@@ -45,11 +68,21 @@ type segment struct {
 
 // NewRouter compiles packages into a Router. It fails on duplicate package
 // mounts and on path templates that ServeMux cannot disambiguate.
-func NewRouter(pkgs []*pkg.Package, maxBodyBytes int64, log *slog.Logger) (*Router, error) {
-	if log == nil {
-		log = slog.New(slog.DiscardHandler)
+func NewRouter(pkgs []*pkg.Package, o RouterOptions) (*Router, error) {
+	if o.Log == nil {
+		o.Log = slog.New(slog.DiscardHandler)
 	}
-	rt := &Router{mux: http.NewServeMux(), log: log, maxBodyBytes: maxBodyBytes, packages: pkgs}
+	if o.State == nil {
+		o.State = state.NewMemory()
+	}
+	rt := &Router{mux: http.NewServeMux(), log: o.Log, maxBodyBytes: o.MaxBodyBytes, packages: pkgs,
+		state: o.State, traffic: o.Traffic, metrics: o.Metrics, recorder: o.Recorder,
+		proxies: map[*pkg.Package]*httputil.ReverseProxy{}}
+	for _, p := range pkgs {
+		if p.Proxy != nil {
+			rt.proxies[p] = rt.newProxy(p)
+		}
+	}
 	seen := map[string]string{}
 	for _, p := range pkgs {
 		id := p.Name + "@" + p.Version
@@ -93,16 +126,48 @@ func NewRouter(pkgs []*pkg.Package, maxBodyBytes int64, log *slog.Logger) (*Rout
 		}
 		// ServeMux redirects /users/x to /users/x/ when only the slash form
 		// is registered; OpenAPI treats them as different paths, so claim
-		// the slash-less form as not found unless a route owns it.
+		// the slash-less form as unmatched unless a route owns it.
 		if base, ok := strings.CutSuffix(pattern, "/{$}"); ok && base != "" {
 			if _, owned := groups[base]; !owned {
 				groups[base] = nil
-				rt.mux.HandleFunc(base, rt.notFound)
+				p := routes[0].pkg
+				rt.mux.HandleFunc(base, func(w http.ResponseWriter, r *http.Request) { rt.unmatched(w, r, p) })
 			}
 		}
 	}
-	if err := rt.handle("/", nil); err != nil {
+
+	// Packages that proxy unmatched routes own their whole base path.
+	var rootProxy *pkg.Package
+	for _, p := range pkgs {
+		if p.Proxy == nil || !p.Proxy.OnUnmatchedRoute {
+			continue
+		}
+		if p.BasePath == "" {
+			if rootProxy != nil {
+				return nil, fmt.Errorf("packages %s and %s both proxy unmatched routes at /", rootProxy.Name, p.Name)
+			}
+			rootProxy = p
+			continue
+		}
+		handler := func(w http.ResponseWriter, r *http.Request) { rt.unmatched(w, r, p) }
+		for _, pattern := range []string{p.BasePath + "/", p.BasePath} {
+			if _, owned := groups[pattern]; owned {
+				continue
+			}
+			if err := rt.handleFunc(pattern, handler); err != nil {
+				return nil, fmt.Errorf("package %s proxy: %w", p.Name, err)
+			}
+		}
+	}
+	if err := rt.handleFunc("/", func(w http.ResponseWriter, r *http.Request) { rt.unmatched(w, r, rootProxy) }); err != nil {
 		return nil, err
+	}
+	// Seed last: o.State is live, and a build that fails must not change it.
+	// Seeding is idempotent, so rebuilding on reload keeps changed state.
+	for _, p := range pkgs {
+		if err := p.SeedState(context.Background(), o.State); err != nil {
+			return nil, fmt.Errorf("package %s: %w", p.Name, err)
+		}
 	}
 	return rt, nil
 }
@@ -121,17 +186,24 @@ func (rt *Router) handle(pattern string, routes []*route) (err error) {
 			err = fmt.Errorf("route %s (%s) conflicts with another route: %v", pattern, strings.Join(names, ", "), v)
 		}
 	}()
-	if routes == nil {
-		rt.mux.HandleFunc(pattern, rt.notFound)
-		return nil
-	}
 	rt.mux.Handle(pattern, &pathHandler{rt: rt, routes: routes})
 	return nil
 }
 
-// ServeHTTP dispatches to the matching path handler, or answers 404.
+func (rt *Router) handleFunc(pattern string, h http.HandlerFunc) (err error) {
+	defer func() {
+		if v := recover(); v != nil {
+			err = fmt.Errorf("route %s conflicts with another route: %v", pattern, v)
+		}
+	}()
+	rt.mux.HandleFunc(pattern, h)
+	return nil
+}
+
+// ServeHTTP dispatches to the matching path handler, or answers 404,
+// recording metrics and traffic.
 func (rt *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	rt.mux.ServeHTTP(w, r)
+	rt.observe(w, r, rt.mux)
 }
 
 func (rt *Router) notFound(w http.ResponseWriter, r *http.Request) {

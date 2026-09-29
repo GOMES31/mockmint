@@ -14,6 +14,7 @@ import (
 	amqp "github.com/rabbitmq/amqp091-go"
 
 	"github.com/mockmint/mockmint/internal/behavior"
+	"github.com/mockmint/mockmint/internal/observability"
 	"github.com/mockmint/mockmint/internal/pkg"
 	"github.com/mockmint/mockmint/internal/spec/asyncapi"
 )
@@ -26,6 +27,10 @@ type Options struct {
 	ReconnectMin   time.Duration
 	ReconnectMax   time.Duration
 	ConfirmTimeout time.Duration
+
+	// Traffic and Metrics are optional.
+	Traffic *observability.Traffic
+	Metrics *observability.Metrics
 }
 
 // ErrNotConnected is returned by Publish while the broker is unreachable.
@@ -68,6 +73,17 @@ func New(pkgs []*pkg.Package, opts Options, log *slog.Logger) (*Engine, error) {
 // Connected reports whether a broker session is up.
 func (e *Engine) Connected() bool { return e.connected.Load() }
 
+func (e *Engine) setConnected(up bool) {
+	e.connected.Store(up)
+	if m := e.opts.Metrics; m != nil {
+		v := 0.0
+		if up {
+			v = 1
+		}
+		m.AMQPUp.Set(v)
+	}
+}
+
 // HasOperations reports whether any package has async operations.
 func (e *Engine) HasOperations() bool {
 	for _, p := range e.pkgs {
@@ -93,7 +109,7 @@ func (e *Engine) Run(ctx context.Context) {
 			e.log.Info("connected", "url", redact(e.opts.URL))
 			err = e.session(ctx, conn)
 			_ = conn.Close()
-			e.connected.Store(false)
+			e.setConnected(false)
 		}
 		if ctx.Err() != nil {
 			return
@@ -185,7 +201,7 @@ func (e *Engine) session(ctx context.Context, conn *amqp.Connection) error {
 			}
 		}
 	}
-	e.connected.Store(true)
+	e.setConnected(true)
 
 	closed := conn.NotifyClose(make(chan *amqp.Error, 1))
 	select {
@@ -198,7 +214,7 @@ func (e *Engine) session(ctx context.Context, conn *amqp.Connection) error {
 		}
 	case err = <-errc:
 	}
-	e.connected.Store(false)
+	e.setConnected(false)
 	cancel()
 	wg.Wait()
 	return err
@@ -244,19 +260,34 @@ func (e *Engine) serve(ctx context.Context, p *pkg.Package, op *pkg.AsyncOperati
 }
 
 func (e *Engine) handle(ctx context.Context, p *pkg.Package, op *pkg.AsyncOperation, d amqp.Delivery) {
+	start := time.Now()
 	log := e.log.With("package", p.Name, "operation", op.ID, "messageId", d.MessageId, "correlationId", d.CorrelationId)
 	out := Handle(p, op, Delivery{
 		Exchange: d.Exchange, RoutingKey: d.RoutingKey, Body: d.Body, ContentType: d.ContentType,
 		CorrelationID: d.CorrelationId, ReplyTo: d.ReplyTo, MessageID: d.MessageId, Headers: d.Headers,
 	})
+	outcome := "ack"
+	var replyBody []byte
+	defer func() {
+		if m := e.opts.Metrics; m != nil {
+			m.AMQPMessages.Inc(p.Name, op.ID, outcome)
+		}
+		e.opts.Traffic.Record(observability.Exchange{
+			Time: start, Protocol: "amqp", Package: p.Name, Operation: op.ID, Example: out.Example,
+			Duration: time.Since(start), Path: d.RoutingKey, Outcome: outcome,
+			Headers: tableStrings(d.Headers), Body: string(d.Body), RespBody: string(replyBody),
+		})
+	}()
 	for _, w := range out.Warnings {
 		log.Warn("validation", "warning", w)
 	}
 	if behavior.Sleep(ctx, out.Delay) != nil {
+		outcome = "requeue"
 		_ = d.Nack(false, true) // shutting down: hand the message back
 		return
 	}
 	if out.Verdict == Reject {
+		outcome = "reject"
 		log.Warn("message rejected", "reason", out.Reason)
 		_ = d.Nack(false, false)
 		return
@@ -267,14 +298,17 @@ func (e *Engine) handle(ctx context.Context, p *pkg.Package, op *pkg.AsyncOperat
 		case errors.Is(err, ErrUnroutable):
 			// Requeueing would loop forever if the caller's reply queue is
 			// gone; dead-letter the request instead.
+			outcome = "reject"
 			log.Warn("reply unroutable; rejecting request", "error", err, "replyTo", out.Reply.RoutingKey)
 			_ = d.Nack(false, false)
 			return
 		case err != nil:
+			outcome = "requeue"
 			log.Warn("reply failed; requeueing request", "error", err)
 			_ = d.Nack(false, true)
 			return
 		}
+		replyBody = out.Reply.Msg.Body
 		log.Debug("replied", "example", out.Example, "to", out.Reply.RoutingKey)
 	} else if out.Reason != "" {
 		log.Info("no reply", "reason", out.Reason)
@@ -369,9 +403,21 @@ func (e *Engine) Publish(ctx context.Context, pkgName, opID, example string) err
 	if err != nil {
 		return err
 	}
-	if err := e.publish(ctx, o); err != nil {
+	err = e.publish(ctx, o)
+	if m := e.opts.Metrics; m != nil {
+		result := "ok"
+		if err != nil {
+			result = "error"
+		}
+		m.AMQPPublish.Inc(pkgName, opID, result)
+	}
+	if err != nil {
 		return err
 	}
+	e.opts.Traffic.Record(observability.Exchange{
+		Time: time.Now(), Protocol: "amqp", Package: pkgName, Operation: opID, Example: example,
+		Path: o.RoutingKey, Outcome: "published", RespBody: string(o.Msg.Body),
+	})
 	e.log.Debug("published", "package", pkgName, "operation", opID, "example", example, "exchange", o.Exchange, "routingKey", o.RoutingKey)
 	return nil
 }
@@ -393,6 +439,20 @@ func (e *Engine) sendOperation(pkgName, opID string) (*pkg.Package, *pkg.AsyncOp
 		return nil, nil, fmt.Errorf("package %s has no async operation %q", pkgName, opID)
 	}
 	return nil, nil, fmt.Errorf("no package %q with async operations", pkgName)
+}
+
+// Packages returns the packages the engine serves.
+func (e *Engine) Packages() []*pkg.Package { return e.pkgs }
+
+func tableStrings(t amqp.Table) map[string]string {
+	if len(t) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(t))
+	for k, v := range t {
+		out[k] = headerString(v)
+	}
+	return out
 }
 
 // redact hides the password in an AMQP URL for logs.

@@ -23,6 +23,10 @@ const (
 	TypeRateLimited       = TypeBase + "rate-limited"
 	TypeBodyTooLarge      = TypeBase + "body-too-large"
 	TypeInjectedFault     = TypeBase + "injected-fault"
+	TypeBadGateway        = TypeBase + "bad-gateway"
+	TypeUnauthorized      = TypeBase + "unauthorized"
+	TypeConflict          = TypeBase + "conflict"
+	TypeInvalidPackage    = TypeBase + "invalid-package"
 	TypeInternal          = TypeBase + "internal"
 )
 

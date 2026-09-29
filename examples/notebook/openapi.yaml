@@ -2,7 +2,7 @@ openapi: 3.0.3
 info:
   title: Notebook
   version: "1.0"
-  description: Example CRUD API for notes. Responses are mocked; writes are not persisted.
+  description: Example CRUD API for notes, backed by mockmint state (see mockmint.yaml).
 paths:
   /notes:
     get:

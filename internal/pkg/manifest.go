@@ -50,9 +50,13 @@ type Manifest struct {
 	// Templating is auto, on or off (default auto).
 	Templating string `yaml:"templating"`
 
-	Behavior   behavior.Config               `yaml:"behavior"`
-	Fallback   *Fallback                     `yaml:"fallback"`
-	Operations map[string]OperationOverrides `yaml:"operations"`
+	Behavior behavior.Config `yaml:"behavior"`
+	Fallback *Fallback       `yaml:"fallback"`
+	Proxy    *ProxyConfig    `yaml:"proxy"`
+	// InitialState seeds stateful collections: collection → key → value.
+	// A collection is seeded only while it is empty.
+	InitialState map[string]map[string]any     `yaml:"initialState"`
+	Operations   map[string]OperationOverrides `yaml:"operations"`
 
 	// Async configures the AsyncAPI (RabbitMQ) side of the package.
 	Async *AsyncManifest `yaml:"async"`
@@ -65,6 +69,7 @@ type OperationOverrides struct {
 	Behavior   behavior.Config `yaml:"behavior"`
 	Fallback   *Fallback       `yaml:"fallback"`
 	Validation string          `yaml:"validation"`
+	State      *StateConfig    `yaml:"state"`
 }
 
 // Fallback is the response when the dispatcher finds no example: either a

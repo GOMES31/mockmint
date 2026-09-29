@@ -88,6 +88,7 @@ func TestLoadErrors(t *testing.T) {
 		{"bad env int", "", []string{"MOCKMINT_HTTP_MAXBODYBYTES=big"}, "MOCKMINT_HTTP_MAXBODYBYTES"},
 		{"nonpositive body", "", []string{"MOCKMINT_HTTP_MAXBODYBYTES=0"}, "maxBodyBytes"},
 		{"bad amqp url", "", []string{"MOCKMINT_AMQP_URL=http://x"}, "amqp.url"},
+		{"same ports", "http: {addr: ':9000'}\nadmin: {addr: ':9000'}\n", nil, "admin.addr must differ"},
 		{"bad prefetch", "", []string{"MOCKMINT_AMQP_PREFETCH=0"}, "prefetch"},
 		{"bad reconnect", "amqp: {reconnectMin: 2s, reconnectMax: 1s}\n", nil, "reconnectMin"},
 	}
@@ -98,5 +99,23 @@ func TestLoadErrors(t *testing.T) {
 				t.Fatalf("err = %v, want containing %q", err, tt.want)
 			}
 		})
+	}
+}
+
+func TestAdminDefaultsToLoopback(t *testing.T) {
+	if a := Default().Admin; a.Addr != "127.0.0.1:9090" || a.Exposed() {
+		t.Fatalf("default admin addr = %q (exposed %v), want loopback", a.Addr, a.Exposed())
+	}
+}
+
+func TestAdminExposed(t *testing.T) {
+	for addr, want := range map[string]bool{
+		"127.0.0.1:9090": false, "[::1]:9090": false, "localhost:9090": false, "127.0.0.2:0": false,
+		":9090": true, "0.0.0.0:9090": true, "[::]:9090": true, "10.0.0.5:9090": true, "mock.internal:9090": true,
+		"": false, "garbage": true,
+	} {
+		if got := (Admin{Addr: addr}).Exposed(); got != want {
+			t.Errorf("Exposed(%q) = %v, want %v", addr, got, want)
+		}
 	}
 }

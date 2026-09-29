@@ -40,7 +40,7 @@ func (h *pathHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if rt == nil {
-		h.rt.notFound(w, r)
+		h.rt.unmatched(w, r, h.routes[0].pkg)
 		return
 	}
 	op := rt.ops[r.Method]
@@ -48,6 +48,11 @@ func (h *pathHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		op = rt.ops[http.MethodGet] // net/http discards the body for HEAD
 	}
 	if op == nil {
+		if p := rt.pkg; p.Proxy != nil && p.Proxy.OnUnmatchedRoute {
+			annotate(w, p.Name, "", "")
+			h.rt.forward(w, r, p, nil, nil, nil)
+			return
+		}
 		w.Header().Set("Allow", rt.allow)
 		problem.Write(w, r, problem.New(problem.TypeMethodNotAllowed, http.StatusMethodNotAllowed,
 			r.Method+" is not allowed on "+rt.template).With("allow", strings.Split(rt.allow, ", ")))
@@ -56,8 +61,20 @@ func (h *pathHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.rt.serve(w, r, rt.pkg, op, params)
 }
 
+// unmatched answers a request under p's base path that matches no
+// operation: proxied when p proxies unmatched routes, else 404.
+func (rt *Router) unmatched(w http.ResponseWriter, r *http.Request, p *pkg.Package) {
+	if p != nil && p.Proxy != nil && p.Proxy.OnUnmatchedRoute {
+		annotate(w, p.Name, "", "")
+		rt.forward(w, r, p, nil, nil, nil)
+		return
+	}
+	rt.notFound(w, r)
+}
+
 func (rt *Router) serve(w http.ResponseWriter, r *http.Request, p *pkg.Package, op *pkg.Operation, params map[string]string) {
 	log := rt.log.With("package", p.Name, "operation", op.ID)
+	annotate(w, p.Name, op.ID, "")
 
 	if ok, wait := op.Behavior.Allow(); !ok {
 		secs := max(1, int((wait+999_999_999)/1_000_000_000))
@@ -83,17 +100,56 @@ func (rt *Router) serve(w http.ResponseWriter, r *http.Request, p *pkg.Package, 
 	}
 
 	rng := template.NewRand(p.Seed, []byte(op.ID), []byte(r.Method), []byte(r.URL.EscapedPath()), []byte(canonicalQuery(r.URL)), body)
-
 	dreq := &dispatch.Request{Method: r.Method, Path: r.URL.Path, PathParams: params, Query: r.URL.Query(), Header: r.Header, Body: body}
-	name, ok, err := op.Dispatcher.Dispatch(dreq)
-	if err != nil {
-		log.Error("dispatch failed", "error", err)
-		problem.Write(w, r, problem.New(problem.TypeInternal, http.StatusInternalServerError, err.Error()))
-		return
+	var data *template.Data
+	getData := func() *template.Data {
+		if data == nil {
+			data = template.NewData(templateRequest(r, dreq, params), op.ID, "", rng, p.Now())
+		}
+		return data
 	}
-	resp := op.Responses[name]
-	if !ok || resp == nil {
+
+	// Stateful operations look their entry up before dispatch, so a missing
+	// key becomes the fallback (or 404) regardless of example matching.
+	var sc *stateCtx
+	var resp *pkg.Response
+	missing := false
+	if op.State != nil {
+		sc = &stateCtx{op: op.State, ns: p.Name, store: rt.state}
+		switch err := sc.resolve(r.Context(), getData()); {
+		case errors.Is(err, errStateMissing):
+			missing = true
+		case err != nil:
+			log.Error("state lookup failed", "error", err)
+			problem.Write(w, r, problem.New(problem.TypeInternal, http.StatusInternalServerError, err.Error()))
+			return
+		}
+		getData().State = template.NewState(sc.value, sc.found, stateReader{ctx: r.Context(), store: rt.state, ns: p.Name})
+	}
+
+	if missing {
 		resp = op.Fallback
+	} else {
+		name, ok, err := op.Dispatcher.Dispatch(dreq)
+		if err != nil {
+			log.Error("dispatch failed", "error", err)
+			problem.Write(w, r, problem.New(problem.TypeInternal, http.StatusInternalServerError, err.Error()))
+			return
+		}
+		resp = op.Responses[name]
+		if (!ok || resp == nil) && p.Proxy != nil && p.Proxy.OnNoExample {
+			rt.forward(w, r, p, op, params, body)
+			return
+		}
+		if (!ok || resp == nil) && sc != nil {
+			// The state entry exists (or is being created/listed): the body
+			// comes from state, so any example shape will do. The fallback is
+			// for missing entries only.
+			resp = op.Responses[op.DefaultExample]
+		}
+		if resp == nil {
+			resp = op.Fallback
+		}
 	}
 
 	fault, faulted := op.Behavior.Fault(rng)
@@ -109,12 +165,45 @@ func (rt *Router) serve(w http.ResponseWriter, r *http.Request, p *pkg.Package, 
 		return
 	}
 
-	if resp == nil {
+	switch {
+	case resp == nil && missing:
+		problem.Write(w, r, problem.New(problem.TypeNotFound, http.StatusNotFound,
+			"no "+op.State.Collection+" entry with key "+strconv.Quote(sc.key)))
+		return
+	case resp == nil:
 		problem.Write(w, r, problem.New(problem.TypeNoMatchingExample, http.StatusNotFound,
 			"no example of "+op.ID+" matches this request").With("examples", op.ExampleNames()))
 		return
 	}
-	rt.render(w, r, p, op, resp, dreq, params, rng, log)
+	annotate(w, p.Name, op.ID, resp.Example)
+
+	out, err := rt.build(resp, getData)
+	if err != nil {
+		log.Error("render example", "example", resp.Example, "error", err)
+		problem.Write(w, r, problem.New(problem.TypeInternal, http.StatusInternalServerError, err.Error()))
+		return
+	}
+	// State changes apply to successful answers only; an error example
+	// (validation 422, a fallback 404) leaves state untouched.
+	if sc != nil && !missing && resp.Status >= 200 && resp.Status < 300 {
+		replaced, err := sc.apply(r.Context(), getData(), out.body)
+		if errors.Is(err, errStateMissing) { // deleted by a concurrent request
+			problem.Write(w, r, problem.New(problem.TypeNotFound, http.StatusNotFound,
+				"no "+op.State.Collection+" entry with key "+strconv.Quote(sc.key)))
+			return
+		}
+		if err != nil {
+			log.Error("state update failed", "error", err)
+			problem.Write(w, r, problem.New(problem.TypeInternal, http.StatusInternalServerError, err.Error()))
+			return
+		}
+		if replaced != nil {
+			out.body = replaced
+			out.mediaType = "application/json"
+		}
+	}
+	out.write(w, r)
+	log.Debug("served", "method", r.Method, "path", r.URL.Path, "status", resp.Status, "example", resp.Example)
 }
 
 // validate applies request validation. It returns false when the request

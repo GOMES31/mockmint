@@ -3,6 +3,7 @@ package http
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -41,7 +42,7 @@ func loadFS(t *testing.T, files map[string]string) *pkg.Package {
 
 func newServer(t *testing.T, pkgs ...*pkg.Package) *httptest.Server {
 	t.Helper()
-	rt, err := NewRouter(pkgs, 1<<10, nil)
+	rt, err := NewRouter(pkgs, RouterOptions{MaxBodyBytes: 1 << 10})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,28 +98,32 @@ func TestNotebookEndToEnd(t *testing.T) {
 	srv := newServer(t, loadNotebook(t)...)
 	base := "/notebook/1.0"
 
-	// auto dispatch: request halves from parameter examples.
+	// Seeded state: GET reads the stored note.
 	r := do(t, srv, "GET", base+"/notes/2", "")
-	if r.status != 200 || !strings.Contains(r.body, `"title":"Ideas"`) || r.header.Get(HeaderExample) != "ideas" {
+	if r.status != 200 || jsonField(t, r.body, "title") != "Ideas" || r.header.Get("Content-Type") != "application/json" {
 		t.Fatalf("GET /notes/2 = %d %s", r.status, r.body)
 	}
-	// fallback example for unmatched ids.
+	// Missing key: the operation's fallback example.
 	r = do(t, srv, "GET", base+"/notes/77", "")
 	if r.status != 404 || r.header.Get("Content-Type") != "application/problem+json" || !strings.Contains(r.body, "No such note") {
 		t.Fatalf("GET /notes/77 = %d %s", r.status, r.body)
 	}
-	// query_params dispatcher.
-	if r = do(t, srv, "GET", base+"/notes?status=published", ""); r.header.Get(HeaderExample) != "published" {
-		t.Fatalf("published = %s", r.header.Get(HeaderExample))
+	// List with a where filter from the query.
+	if r = do(t, srv, "GET", base+"/notes?status=published", ""); countItems(t, r.body) != 1 {
+		t.Fatalf("published = %s", r.body)
 	}
-	if r = do(t, srv, "GET", base+"/notes", ""); r.header.Get(HeaderExample) != "all" {
-		t.Fatalf("all = %s", r.header.Get(HeaderExample))
+	if r = do(t, srv, "GET", base+"/notes", ""); countItems(t, r.body) != 2 {
+		t.Fatalf("all = %s", r.body)
 	}
-	// body_jsonpath dispatcher + templated response.
+	// body_jsonpath dispatcher: an error example leaves state untouched.
 	r = do(t, srv, "POST", base+"/notes", `{"title":"News","content":"Ready","status":"published"}`)
 	if r.status != 422 || r.header.Get("Content-Type") != "application/problem+json" {
 		t.Fatalf("publish-first = %d %s", r.status, r.body)
 	}
+	if r = do(t, srv, "GET", base+"/notes", ""); countItems(t, r.body) != 2 {
+		t.Fatalf("422 changed state: %s", r.body)
+	}
+	// Create: templated response, stored under its id.
 	r = do(t, srv, "POST", base+"/notes", `{"title":"Meeting \"2\"","content":"Agenda","status":"draft"}`)
 	var note map[string]any
 	if r.status != 201 || json.Unmarshal([]byte(r.body), &note) != nil {
@@ -127,23 +132,52 @@ func TestNotebookEndToEnd(t *testing.T) {
 	if note["title"] != `Meeting "2"` || note["createdAt"] != "2025-01-01T12:00:00.000Z" || r.header.Get("X-Created-Title") != `Meeting "2"` {
 		t.Fatalf("templated = %s headers %v", r.body, r.header)
 	}
-	// Deterministic under seed: same request, same body.
+	id := fmt.Sprint(note["id"])
+	// Deterministic under seed: same request, same body (and same id).
 	if again := do(t, srv, "POST", base+"/notes", `{"title":"Meeting \"2\"","content":"Agenda","status":"draft"}`); again.body != r.body {
 		t.Fatalf("not deterministic:\n%s\n%s", r.body, again.body)
 	}
-	// Update returns request data, including the path id.
-	r = do(t, srv, "PUT", base+"/notes/1", `{"title":"Welcome again","content":"Revised","status":"published"}`)
-	if r.status != 200 || !strings.Contains(r.body, `"id": 1`) || !strings.Contains(r.body, `"title": "Welcome again"`) {
+	if got := do(t, srv, "GET", base+"/notes/"+id, ""); got.status != 200 || jsonField(t, got.body, "title") != `Meeting "2"` {
+		t.Fatalf("read after create = %d %s", got.status, got.body)
+	}
+	// Update merges the request into the stored note (id and createdAt stay).
+	r = do(t, srv, "PUT", base+"/notes/"+id, `{"title":"Meeting 3","content":"Revised","status":"published"}`)
+	if r.status != 200 || jsonField(t, r.body, "title") != "Meeting 3" || jsonField(t, r.body, "createdAt") != "2025-01-01T12:00:00.000Z" {
 		t.Fatalf("update = %d %s", r.status, r.body)
 	}
-	// 204 without body or content type.
-	r = do(t, srv, "DELETE", base+"/notes/1", "")
-	if r.status != 204 && r.status != 503 {
-		t.Fatalf("delete = %d", r.status)
+	if r = do(t, srv, "GET", base+"/notes?status=published", ""); countItems(t, r.body) != 2 {
+		t.Fatalf("list after update = %s", r.body)
 	}
-	if r.status == 204 && (r.body != "" || r.header.Get("Content-Type") != "") {
-		t.Fatalf("204 carried a body: %q %q", r.body, r.header.Get("Content-Type"))
+	if r = do(t, srv, "PUT", base+"/notes/404", `{"title":"x","content":"y","status":"draft"}`); r.status != 404 || problemOf(t, r)["type"] != problem.TypeNotFound {
+		t.Fatalf("update missing = %d %s", r.status, r.body)
 	}
+	// Delete: 204 without body, then the note is gone. deleteNote injects
+	// a seeded 10% 503; this request's seed does not trigger it.
+	r = do(t, srv, "DELETE", base+"/notes/"+id, "")
+	if r.status != 204 || r.body != "" || r.header.Get("Content-Type") != "" {
+		t.Fatalf("delete = %d %q %q", r.status, r.body, r.header.Get("Content-Type"))
+	}
+	if r = do(t, srv, "GET", base+"/notes/"+id, ""); r.status != 404 {
+		t.Fatalf("read after delete = %d", r.status)
+	}
+}
+
+func jsonField(t *testing.T, body, field string) string {
+	t.Helper()
+	var m map[string]any
+	if err := json.Unmarshal([]byte(body), &m); err != nil {
+		t.Fatalf("body %s: %v", body, err)
+	}
+	return fmt.Sprint(m[field])
+}
+
+func countItems(t *testing.T, body string) int {
+	t.Helper()
+	var items []any
+	if err := json.Unmarshal([]byte(body), &items); err != nil {
+		t.Fatalf("body %s: %v", body, err)
+	}
+	return len(items)
 }
 
 func TestStrictValidation(t *testing.T) {
@@ -280,7 +314,7 @@ func TestRouting(t *testing.T) {
 func TestRouterConflicts(t *testing.T) {
 	a := loadFS(t, map[string]string{"openapi.yaml": specWithBody})
 	b := loadFS(t, map[string]string{"openapi.yaml": specWithBody})
-	if _, err := NewRouter([]*pkg.Package{a, b}, 1024, nil); err == nil || !strings.Contains(err.Error(), "are both t@1") {
+	if _, err := NewRouter([]*pkg.Package{a, b}, RouterOptions{MaxBodyBytes: 1024}); err == nil || !strings.Contains(err.Error(), "are both t@1") {
 		t.Fatalf("duplicate package err = %v", err)
 	}
 	c := loadFS(t, map[string]string{"openapi.yaml": `openapi: 3.0.3
@@ -293,7 +327,7 @@ paths:
     parameters: [{name: b, in: path, required: true, schema: {type: string}}]
     get: {responses: {"204": {description: ok}}}
 `})
-	if _, err := NewRouter([]*pkg.Package{c}, 1024, nil); err == nil || !strings.Contains(err.Error(), "conflicts") {
+	if _, err := NewRouter([]*pkg.Package{c}, RouterOptions{MaxBodyBytes: 1024}); err == nil || !strings.Contains(err.Error(), "conflicts") {
 		t.Fatalf("conflict err = %v", err)
 	}
 }
@@ -363,11 +397,11 @@ func TestNoMatchingExample(t *testing.T) {
 
 func TestSwapIsAtomicUnderLoad(t *testing.T) {
 	a := loadFS(t, map[string]string{"openapi.yaml": specWithBody})
-	rtA, err := NewRouter([]*pkg.Package{a}, 1024, nil)
+	rtA, err := NewRouter([]*pkg.Package{a}, RouterOptions{MaxBodyBytes: 1024})
 	if err != nil {
 		t.Fatal(err)
 	}
-	rtEmpty, err := NewRouter(nil, 1024, nil)
+	rtEmpty, err := NewRouter(nil, RouterOptions{MaxBodyBytes: 1024})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -402,7 +436,7 @@ func TestSwapIsAtomicUnderLoad(t *testing.T) {
 }
 
 func TestServeAndShutdown(t *testing.T) {
-	rt, err := NewRouter(loadNotebook(t), 1024, nil)
+	rt, err := NewRouter(loadNotebook(t), RouterOptions{MaxBodyBytes: 1024})
 	if err != nil {
 		t.Fatal(err)
 	}
