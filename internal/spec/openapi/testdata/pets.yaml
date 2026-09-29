@@ -1,0 +1,73 @@
+openapi: 3.1.0
+info: {title: Pet Store, version: "1.2"}
+paths:
+  /pets/{pet-id}:
+    parameters:
+      - name: pet-id
+        in: path
+        required: true
+        schema: {type: integer, minimum: 1}
+        examples:
+          cat: {value: 1}
+          dog: {value: 2}
+    get:
+      operationId: getPet
+      parameters:
+        - name: verbose
+          in: query
+          schema: {type: boolean}
+          examples:
+            dog: {value: true}
+      responses:
+        "200":
+          description: ok
+          headers:
+            X-Rate-Remaining: {schema: {type: integer, example: 99}}
+          content:
+            application/json:
+              schema: {$ref: "schemas/pet.yaml"}
+              examples:
+                cat: {value: {id: 1, name: Tom, kind: cat}}
+                dog: {value: {id: 2, name: Rex, kind: dog}}
+                broken: {value: {id: "x"}}
+        "404":
+          description: missing
+          content:
+            application/problem+json:
+              example: {title: not found}
+    delete:
+      responses:
+        "204": {description: gone}
+  /pets:
+    get:
+      responses:
+        "200":
+          description: list
+          content:
+            application/json:
+              schema:
+                type: array
+                minItems: 2
+                maxItems: 2
+                items: {$ref: "schemas/pet.yaml"}
+    post:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "schemas/pet.yaml"}
+            examples:
+              created: {value: {name: Nemo, kind: fish}}
+      responses:
+        "201":
+          description: created
+          content:
+            application/json:
+              schema: {$ref: "schemas/pet.yaml"}
+              examples:
+                created: {value: {id: 3, name: Nemo, kind: fish}}
+        default:
+          description: error
+          content:
+            text/plain:
+              example: boom

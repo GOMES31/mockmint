@@ -1,0 +1,6 @@
+.git
+.codex
+bin
+docs
+*.md
+!examples/**

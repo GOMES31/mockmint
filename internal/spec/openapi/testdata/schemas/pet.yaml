@@ -1,0 +1,16 @@
+type: object
+required: [name, kind]
+properties:
+  id: {type: integer, readOnly: true, minimum: 1, maximum: 99}
+  name: {type: string, minLength: 2, maxLength: 20}
+  kind: {type: string, enum: [cat, dog, fish]}
+  tag: {type: [string, "null"]}
+  born: {type: string, format: date}
+  owner: {$ref: "#/$defs/owner"}
+$defs:
+  owner:
+    type: object
+    required: [email]
+    properties:
+      email: {type: string, format: email}
+      friend: {$ref: "#/$defs/owner"}

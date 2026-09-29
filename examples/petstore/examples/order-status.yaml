@@ -1,0 +1,11 @@
+operation: GET /orders/{orderId}/status
+examples:
+  placed:
+    response:
+      body: '{"orderId": {{json .Request.Params.orderId}}, "status": "placed"}'
+  approved:
+    response:
+      body: '{"orderId": {{json .Request.Params.orderId}}, "status": "approved"}'
+  delivered:
+    response:
+      body: '{"orderId": {{json .Request.Params.orderId}}, "status": "delivered"}'
