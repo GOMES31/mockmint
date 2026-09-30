@@ -4,3 +4,8 @@
 *.test
 *.out
 coverage.*
+
+# local planning notes
+findings.md
+progress.md
+task_plan.md
