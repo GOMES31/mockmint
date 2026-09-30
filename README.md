@@ -5,7 +5,13 @@ example files: a single static binary (~14 MB), ~20 ms startup, under 20 MB
 resident at idle. No Go code per mock.
 
 > Status: **Phases 1–3** (HTTP core, RabbitMQ engine, admin API with state,
-> proxying and hot reload). Contract testing (Phase 4) is not built yet.
+> proxying and hot reload). Contract testing (Phase 4) is not built yet; see
+> the [roadmap](docs/roadmap.md).
+
+**Documentation:** [getting started](docs/getting-started.md) ·
+[CLI and configuration](docs/cli.md) · [Kubernetes](docs/kubernetes.md) ·
+[CI/CD](docs/ci.md) · [design](docs/design.md) · [all docs](docs/README.md).
+This README is the reference.
 
 ## Quick start
 
@@ -431,4 +437,5 @@ make lint         # golangci-lint v2
 make bench
 ```
 
-See [docs/design.md](docs/design.md) for architecture and decisions.
+See [docs/design.md](docs/design.md) for architecture and decisions, and
+[docs/roadmap.md](docs/roadmap.md) for what is left to build.
